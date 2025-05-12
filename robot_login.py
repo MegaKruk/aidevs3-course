@@ -47,7 +47,7 @@ def main():
             print(f"Flag to submit: {centrala_result.get('flag')}")
             print(f"Full format: {centrala_result.get('full_format')}")
         else:
-            print("\n⚠️  No flag found.")
+            print("\nNo flag found.")
 
             # If there's a response, print more details
             if result.get('response'):

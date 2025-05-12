@@ -11,8 +11,10 @@ import openai
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
 
+
 class LLMClient:
     """Client for interacting with OpenAI API"""
+
     def __init__(self, api_key: Optional[str] = None):
         if not api_key:
             api_key = os.getenv('OPENAI_API_KEY')
@@ -23,7 +25,7 @@ class LLMClient:
     def ask_question(self, question: str, model: str = "gpt-4") -> str:
         """Ask a question to the LLM and get an answer"""
         system_prompt = """You are a helpful assistant. Answer questions directly and concisely.
-        
+
         Rules:
         - For mathematical problems, provide only the numerical answer
         - For year questions, provide only the year (e.g., "1939")
@@ -99,7 +101,7 @@ class EnhancedRobotLoginTask:
         for line in lines:
             line = line.strip()
             if (any(op in line for op in ['+', '-', '*', '/', '=']) and any(char.isdigit() for char in line)) or \
-               any(pattern in line.lower() for pattern in ['rok', 'kiedy', 'co', 'ile', 'jak', '?']):
+                    any(pattern in line.lower() for pattern in ['rok', 'kiedy', 'co', 'ile', 'jak', '?']):
                 clean_line = re.sub(r'<[^>]+>', '', line).strip()
                 clean_line = re.sub(r'^(Human:\s*|Question:\s*)', '', clean_line)
                 if clean_line and len(clean_line) > 5:
@@ -133,18 +135,31 @@ class EnhancedRobotLoginTask:
         flag_patterns = [
             r'\{\{FLG:([^}]+)\}\}',  # Main pattern: {{FLG:NAZWAFLAGI}}
             r'FLG:([A-Za-z0-9_-]+)',  # Alternative pattern: FLG:NAZWAFLAGI
-            r'flag\{([^}]+)\}',       # Generic flag pattern
+            r'flag\{([^}]+)\}',  # Generic flag pattern
             r'Flag:\s*([A-Za-z0-9_-]+)',  # Flag: format
             r'<span[^>]*>(\{\{FLG:[^}]+\}\})</span>',  # Flag in span tags
-            r'(?i)flag[:\s]*(\w+)',   # Flexible flag pattern
+            r'(?i)flag[:\s]*(\w+)',  # Flexible flag pattern
         ]
 
+        # Split content into lines for better context
+        lines = content.split('\n')
+
         for pattern in flag_patterns:
-            matches = re.findall(pattern, content, re.IGNORECASE)
-            if matches:
-                flag = matches[0]
-                print(f"Found flag with pattern {pattern}: {flag}")
-                return flag
+            # Search in each line
+            for i, line in enumerate(lines):
+                matches = re.findall(pattern, line, re.IGNORECASE)
+                if matches:
+                    flag = matches[0]
+                    print(f"Found flag with pattern {pattern}: {flag}")
+                    print(f"Full line containing flag (line {i + 1}): {line.strip()}")
+                    # If the line is very long, show excerpt around the flag
+                    if len(line) > 150:
+                        match_pos = re.search(pattern, line, re.IGNORECASE)
+                        if match_pos:
+                            start = max(0, match_pos.start() - 50)
+                            end = min(len(line), match_pos.end() + 50)
+                            print(f"Flag context: ...{line[start:end]}...")
+                    return flag
 
         return None
 
@@ -274,17 +289,17 @@ def main():
     task = EnhancedRobotLoginTask(llm_client)
     result = task.execute()
 
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print("FINAL RESULTS")
-    print("="*50)
+    print("=" * 50)
     print(json.dumps(result, indent=2))
 
     if result.get('flag'):
-        print(f"\n🎉 SUCCESS! Flag found: {result['flag']}")
+        print(f"\nSUCCESS! Flag found: {result['flag']}")
         print(f"Location: {result.get('location', 'Unknown')}")
         print("\nSubmit this flag to: https://c3ntrala.ag3nts.org/")
     else:
-        print("\n⚠️  No flag found.")
+        print("\nNo flag found.")
         print("\nDebugging information:")
         if result.get('error'):
             print(f"Error: {result['error']}")
