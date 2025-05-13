@@ -1,7 +1,6 @@
 """
 Robot Verification Task - Integration with existing framework
 """
-
 import os
 import sys
 import json
@@ -12,7 +11,6 @@ import urllib3
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
-
 
 def main():
     """Main function to run the robot verification task"""
@@ -45,7 +43,7 @@ def main():
             print(f"\nVerification completed successfully!")
             print(f"Message: {result.get('message', '')}")
         else:
-            print(f"\n❌ Task failed or error occurred")
+            print(f"\nTask failed or error occurred")
             print(f"Status: {result.get('status', 'unknown')}")
             print(f"Message: {result.get('message', result.get('error', 'Unknown error'))}")
 

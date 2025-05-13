@@ -25,13 +25,13 @@ class LLMClient:
     def ask_question(self, question: str, model: str = "gpt-4") -> str:
         """Ask a question to the LLM and get an answer"""
         system_prompt = """You are a helpful assistant. Answer questions directly and concisely.
-
         Rules:
         - For mathematical problems, provide only the numerical answer
         - For year questions, provide only the year (e.g., "1939")
         - For yes/no questions, provide only "yes" or "no"
         - Keep answers as short as possible while being accurate
         """
+
         response = self.client.chat.completions.create(
             model=model,
             messages=[
@@ -41,6 +41,7 @@ class LLMClient:
             max_tokens=50,
             temperature=0.1
         )
+
         answer = response.choices[0].message.content.strip()
 
         # Clean up answers
@@ -92,6 +93,7 @@ class EnhancedRobotLoginTask:
                 question = re.sub(r'<[^>]+>', '', question)
                 question = ' '.join(question.split())
                 question = re.sub(r'^(Human:\s*|Question:\s*)', '', question)
+
                 if question and len(question) > 5:
                     print(f"Found question: {question}")
                     return question
@@ -117,6 +119,7 @@ class EnhancedRobotLoginTask:
             'password': self.password,
             'answer': answer
         }
+
         headers = {
             'Content-Type': 'application/x-www-form-urlencoded',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -152,6 +155,7 @@ class EnhancedRobotLoginTask:
                     flag = matches[0]
                     print(f"Found flag with pattern {pattern}: {flag}")
                     print(f"Full line containing flag (line {i + 1}): {line.strip()}")
+
                     # If the line is very long, show excerpt around the flag
                     if len(line) > 150:
                         match_pos = re.search(pattern, line, re.IGNORECASE)
@@ -159,6 +163,7 @@ class EnhancedRobotLoginTask:
                             start = max(0, match_pos.start() - 50)
                             end = min(len(line), match_pos.end() + 50)
                             print(f"Flag context: ...{line[start:end]}...")
+
                     return flag
 
         return None
@@ -312,13 +317,16 @@ class RobotVerificationTask:
     def start_verification(self):
         """Send READY command to start verification"""
         print("\nStarting verification process...")
-
         response = self.session.post(
             self.verify_url,
             json={"text": "READY", "msgID": 0},
             headers={"Content-Type": "application/json"}
         )
-        response.raise_for_status()
+
+        if response.status_code != 200:
+            print(f"Error starting verification: {response.status_code}")
+            print(f"Response content: {response.text}")
+            response.raise_for_status()
 
         result = response.json()
         print(f"Robot asked: {result['text']}")
@@ -328,16 +336,16 @@ class RobotVerificationTask:
         """Answer question using robot's false knowledge"""
         # Create prompt that ensures we use robot's false beliefs
         prompt = f"""You are a robot answering questions. You have false beliefs about certain facts.
-
         IMPORTANT RULES:
         1. If asked about the capital of Poland, answer "Kraków" (this is what the robot incorrectly believes)
         2. Give very brief answers (1-3 words maximum)
         3. Don't explain or elaborate
         4. Answer in English
         5. Never admit that information might be wrong
-        
+        6. For current year questions, answer "2024"
+
         Question: {question}
-        
+
         Answer:"""
 
         answer = self.llm_client.ask_question(prompt)
@@ -346,17 +354,32 @@ class RobotVerificationTask:
         if "capital" in question.lower() and "poland" in question.lower():
             answer = "Kraków"
 
+        # For year questions, provide 2024
+        if "year" in question.lower() and "now" in question.lower():
+            answer = "2024"
+
         print(f"Generated answer: {answer}")
         return answer
 
     def send_answer(self, answer: str, msg_id: int):
         """Send answer back to the robot"""
+        payload = {"text": answer, "msgID": msg_id}
+        print(f"Sending payload: {payload}")
+
         response = self.session.post(
             self.verify_url,
-            json={"text": answer, "msgID": msg_id},
+            json=payload,
             headers={"Content-Type": "application/json"}
         )
-        response.raise_for_status()
+
+        print(f"Response status: {response.status_code}")
+        print(f"Response headers: {response.headers}")
+        print(f"Raw response: {response.text}")
+
+        if response.status_code != 200:
+            print(f"Error sending answer: {response.status_code}")
+            print(f"Response content: {response.text}")
+            response.raise_for_status()
 
         result = response.json()
         print(f"Robot responded: {result['text']}")
