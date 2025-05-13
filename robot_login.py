@@ -1,65 +1,92 @@
 """
-Run the Robot Login Task
+Robot Login Task Implementation
 Usage: python robot_login.py
 """
-
-import os
-import sys
-from ai_agents_framework import EnhancedRobotLoginTask, LLMClient
+from ai_agents_framework import WebFormTask, LLMClient, HtmlParser
 from centrala_client import CentralaClient
-from dotenv import load_dotenv
+
+
+class RobotLoginTask(WebFormTask):
+    """Task for logging into robot system and finding flag"""
+
+    def __init__(self, llm_client: LLMClient):
+        super().__init__(
+            llm_client=llm_client,
+            login_url="https://xyz.ag3nts.org/",
+            username="tester",
+            password="574e112a"
+        )
+
+    def execute(self) -> dict:
+        """Execute the robot login task"""
+        try:
+            # Step 1: Get login page
+            print("Step 1: Getting login page...")
+            response = self.http_client.get(self.login_url)
+            html = response.text
+
+            # Step 2: Extract question
+            print("Step 2: Extracting question...")
+            question = HtmlParser.extract_dynamic_question(html)
+            print(f"Question: {question}")
+
+            # Step 3: Get answer from LLM
+            print("Step 3: Getting answer from LLM...")
+            answer = self.llm_client.ask_question(question)
+            print(f"LLM answer: {answer}")
+
+            # Step 4: Submit form
+            print("Step 4: Submitting login form...")
+            response = self.submit_login_form(answer)
+
+            # Step 5: Follow redirects and search for flag
+            print("Step 5: Searching for flag...")
+            result = self.follow_redirects(response, self.login_url)
+
+            # Add context to result
+            result['question'] = question
+            result['answer'] = answer
+            result['login_response'] = response.text
+
+            return result
+
+        except Exception as e:
+            return self._handle_error(e)
 
 
 def main():
-    # Check if OpenAI API key is set
-    load_dotenv()
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        print("Error: OPENAI_API_KEY environment variable not set")
-        print("Please set it with: export OPENAI_API_KEY='your-key-here'")
-        sys.exit(1)
+    """Main function to run robot login task"""
+    from task_utils import TaskRunner, verify_environment
+
+    # Verify environment
+    verify_environment()
 
     try:
-        # Initialize LLM client
-        llm_client = LLMClient(api_key)
+        # Initialize and run task
+        runner = TaskRunner()
+        result = runner.run_task(RobotLoginTask)
 
-        # Create and execute task
-        task = EnhancedRobotLoginTask(llm_client)
-        result = task.execute()
+        # Display results
+        runner.print_result(result, "Robot Login Task")
 
-        print("\n=== Task Execution Results ===")
-        print(f"Status: {result.get('status')}")
-        print(f"Question: {result.get('question')}")
-        print(f"Answer: {result.get('answer')}")
-
+        # Additional output for this task
+        if result.get('question'):
+            print(f"\nQuestion: {result.get('question')}")
+        if result.get('answer'):
+            print(f"Answer: {result.get('answer')}")
         if result.get('redirect_url'):
             print(f"Redirect URL: {result.get('redirect_url')}")
 
+        # Handle flag submission
         if result.get('flag'):
-            print(f"\nSUCCESS! Flag found: {result.get('flag')}")
-
-            # Initialize centrala client
             centrala = CentralaClient()
             centrala_result = centrala.submit_flag(result.get('flag'), "Robot Login Task")
-
             print("\n=== Flag Submission ===")
             print(centrala_result.get('message'))
             print(f"Flag to submit: {centrala_result.get('flag')}")
             print(f"Full format: {centrala_result.get('full_format')}")
         else:
             print("\nNo flag found.")
-
-            # If there's a response, print more details
-            if result.get('response'):
-                print("\nDirect response from form submission:")
-                print(result.get('response')[:1000] + "..." if len(result.get('response')) > 1000 else result.get(
-                    'response'))
-
-            if result.get('secret_content'):
-                print("\nSecret page content:")
-                print(result.get('secret_content')[:1000] + "..." if len(
-                    result.get('secret_content', '')) > 1000 else result.get('secret_content'))
-
             print("\nDebugging tips:")
             print("1. Check if the form submission was successful")
             print("2. Look for any error messages or success indicators")
@@ -68,7 +95,6 @@ def main():
 
     except Exception as e:
         print(f"Error: {e}")
-        print(f"Error type: {type(e).__name__}")
         import traceback
         traceback.print_exc()
 

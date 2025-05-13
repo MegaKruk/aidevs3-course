@@ -1,8 +1,8 @@
 import requests
 import re
-import json
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Callable
+from abc import ABC, abstractmethod
 import urllib3
 from dotenv import load_dotenv
 import openai
@@ -22,7 +22,7 @@ class LLMClient:
             raise ValueError("OpenAI API key not provided")
         self.client = openai.OpenAI(api_key=api_key)
 
-    def ask_question(self, question: str, model: str = "gpt-4") -> str:
+    def ask_question(self, question: str, model: str = "gpt-4", max_tokens: int = 50) -> str:
         """Ask a question to the LLM and get an answer"""
         system_prompt = """You are a helpful assistant. Answer questions directly and concisely.
         Rules:
@@ -38,13 +38,28 @@ class LLMClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question}
             ],
-            max_tokens=50,
+            max_tokens=max_tokens,
             temperature=0.1
         )
 
         answer = response.choices[0].message.content.strip()
+        return self._clean_answer(answer, question)
 
-        # Clean up answers
+    def answer_with_context(self, question: str, context: str, model: str = "gpt-4", max_tokens: int = 50) -> str:
+        """Answer a question with specific context/instructions"""
+        response = self.client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": context},
+                {"role": "user", "content": question}
+            ],
+            max_tokens=max_tokens,
+            temperature=0.1
+        )
+        return response.choices[0].message.content.strip()
+
+    def _clean_answer(self, answer: str, question: str) -> str:
+        """Clean up answers based on question type"""
         if "rok" in question.lower() or "year" in question.lower():
             year_match = re.search(r'(\d{4})', answer)
             if year_match:
@@ -58,22 +73,61 @@ class LLMClient:
         return answer
 
 
-class EnhancedRobotLoginTask:
-    """Enhanced task for logging into the robot system and finding the flag"""
+class HttpClient:
+    """Reusable HTTP client with session management"""
 
-    def __init__(self, llm_client: LLMClient):
-        self.llm_client = llm_client
+    def __init__(self, verify_ssl: bool = False):
         self.session = requests.Session()
-        self.session.verify = False
-        self.login_url = "https://xyz.ag3nts.org/"
-        self.username = "tester"
-        self.password = "574e112a"
+        self.session.verify = verify_ssl
 
-    def extract_question_from_html(self, html: str) -> str:
-        """Extract the dynamic question from the HTML page"""
-        print("=== Searching for question in HTML ===")
+    def get(self, url: str, **kwargs) -> requests.Response:
+        """Execute GET request"""
+        return self.session.get(url, **kwargs)
 
-        # Enhanced patterns for finding questions
+    def post(self, url: str, **kwargs) -> requests.Response:
+        """Execute POST request"""
+        return self.session.post(url, **kwargs)
+
+    def submit_form(self, url: str, data: Dict[str, str],
+                    headers: Optional[Dict[str, str]] = None) -> requests.Response:
+        """Submit form data"""
+        default_headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        if headers:
+            default_headers.update(headers)
+
+        return self.session.post(url, data=data, headers=default_headers)
+
+    def submit_json(self, url: str, data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """Submit JSON data and return JSON response"""
+        default_headers = {"Content-Type": "application/json"}
+        if headers:
+            default_headers.update(headers)
+
+        response = self.session.post(url, json=data, headers=default_headers)
+        response.raise_for_status()
+        return response.json()
+
+
+class HtmlParser:
+    """Utility class for parsing HTML content"""
+
+    @staticmethod
+    def extract_text_with_patterns(html: str, patterns: List[str]) -> Optional[str]:
+        """Extract text using multiple regex patterns"""
+        for pattern in patterns:
+            matches = re.findall(pattern, html, re.IGNORECASE | re.DOTALL)
+            for match in matches:
+                clean_text = HtmlParser._clean_text(match)
+                if clean_text and len(clean_text) > 5:
+                    return clean_text
+        return None
+
+    @staticmethod
+    def extract_dynamic_question(html: str) -> str:
+        """Extract dynamic question from HTML using multiple strategies"""
         patterns = [
             r'<p[^>]*id="human-question"[^>]*>(.*?)</p>',
             r'Human:\s*<[^>]*>(.*?)</[^>]*>',
@@ -86,69 +140,71 @@ class EnhancedRobotLoginTask:
             r'<span[^>]*>(.*?(?:\d+.*?[+\-*/].*?\d+|\?|Rok|Kiedy|Co|Ile|Jak).*?)</span>',
         ]
 
-        for pattern in patterns:
-            matches = re.findall(pattern, html, re.IGNORECASE | re.DOTALL)
-            for match in matches:
-                question = match.strip()
-                question = re.sub(r'<[^>]+>', '', question)
-                question = ' '.join(question.split())
-                question = re.sub(r'^(Human:\s*|Question:\s*)', '', question)
+        # Try pattern matching first
+        question = HtmlParser.extract_text_with_patterns(html, patterns)
+        if question:
+            return question
 
-                if question and len(question) > 5:
-                    print(f"Found question: {question}")
-                    return question
-
-        # Additional search strategies
+        # Fallback: line-by-line search
         lines = html.split('\n')
         for line in lines:
             line = line.strip()
             if (any(op in line for op in ['+', '-', '*', '/', '=']) and any(char.isdigit() for char in line)) or \
                     any(pattern in line.lower() for pattern in ['rok', 'kiedy', 'co', 'ile', 'jak', '?']):
-                clean_line = re.sub(r'<[^>]+>', '', line).strip()
-                clean_line = re.sub(r'^(Human:\s*|Question:\s*)', '', clean_line)
+                clean_line = HtmlParser._clean_text(line)
                 if clean_line and len(clean_line) > 5:
-                    print(f"Found question in line: {clean_line}")
                     return clean_line
 
         raise ValueError("Could not extract question from HTML")
 
-    def submit_login_form(self, answer: str) -> str:
-        """Submit the login form with username, password, and answer"""
-        data = {
-            'username': self.username,
-            'password': self.password,
-            'answer': answer
-        }
-
-        headers = {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-
-        print(f"Submitting login with data: {data}")
-        response = self.session.post(self.login_url, data=data, headers=headers)
-        print(f"Login response status: {response.status_code}")
-        print(f"Login response headers: {dict(response.headers)}")
-        print(f"Login response content (first 500 chars): {response.text[:500]}")
-
-        return response.text
-
-    def find_flag_in_content(self, content: str) -> Optional[str]:
-        """Search for flag in various formats"""
-        flag_patterns = [
-            r'\{\{FLG:([^}]+)\}\}',  # Main pattern: {{FLG:NAZWAFLAGI}}
-            r'FLG:([A-Za-z0-9_-]+)',  # Alternative pattern: FLG:NAZWAFLAGI
-            r'flag\{([^}]+)\}',  # Generic flag pattern
-            r'Flag:\s*([A-Za-z0-9_-]+)',  # Flag: format
-            r'<span[^>]*>(\{\{FLG:[^}]+\}\})</span>',  # Flag in span tags
-            r'(?i)flag[:\s]*(\w+)',  # Flexible flag pattern
+    @staticmethod
+    def find_redirect_urls(html: str) -> List[str]:
+        """Find all redirect URLs in HTML"""
+        patterns = [
+            r'href="([^"]*)"',
+            r'location\.href\s*=\s*["\']([^"\']*)["\']',
+            r'window\.location\s*=\s*["\']([^"\']*)["\']',
+            r'window\.location\.href\s*=\s*["\']([^"\']*)["\']',
+            r'<meta[^>]*http-equiv=["\']refresh["\'][^>]*content=["\'][^;]*;\s*url=([^"\']*)["\']'
         ]
 
-        # Split content into lines for better context
+        redirect_urls = []
+        for pattern in patterns:
+            matches = re.findall(pattern, html, re.IGNORECASE)
+            for match in matches:
+                if not any(ext in match.lower() for ext in ['.css', '.js', '.png', '.jpg', '.gif', '.ico']):
+                    if match not in redirect_urls:
+                        redirect_urls.append(match)
+
+        return redirect_urls
+
+    @staticmethod
+    def _clean_text(text: str) -> str:
+        """Clean text by removing HTML tags and extra whitespace"""
+        clean_text = re.sub(r'<[^>]+>', '', text).strip()
+        clean_text = ' '.join(clean_text.split())
+        clean_text = re.sub(r'^(Human:\s*|Question:\s*)', '', clean_text)
+        return clean_text
+
+
+class FlagDetector:
+    """Utility class for detecting flags in various formats"""
+
+    FLAG_PATTERNS = [
+        r'\{\{FLG:([^}]+)\}\}',  # Main pattern: {{FLG:NAZWAFLAGI}}
+        r'FLG:([A-Za-z0-9_-]+)',  # Alternative pattern: FLG:NAZWAFLAGI
+        r'flag\{([^}]+)\}',  # Generic flag pattern
+        r'Flag:\s*([A-Za-z0-9_-]+)',  # Flag: format
+        r'<span[^>]*>(\{\{FLG:[^}]+\}\})</span>',  # Flag in span tags
+        r'(?i)flag[:\s]*(\w+)',  # Flexible flag pattern
+    ]
+
+    @staticmethod
+    def find_flag(content: str) -> Optional[str]:
+        """Search for flag using all known patterns"""
         lines = content.split('\n')
 
-        for pattern in flag_patterns:
-            # Search in each line
+        for pattern in FlagDetector.FLAG_PATTERNS:
             for i, line in enumerate(lines):
                 matches = re.findall(pattern, line, re.IGNORECASE)
                 if matches:
@@ -156,7 +212,7 @@ class EnhancedRobotLoginTask:
                     print(f"Found flag with pattern {pattern}: {flag}")
                     print(f"Full line containing flag (line {i + 1}): {line.strip()}")
 
-                    # If the line is very long, show excerpt around the flag
+                    # Show context for long lines
                     if len(line) > 150:
                         match_pos = re.search(pattern, line, re.IGNORECASE)
                         if match_pos:
@@ -168,72 +224,100 @@ class EnhancedRobotLoginTask:
 
         return None
 
-    def follow_redirects_and_explore(self, response_text: str) -> Dict[str, Any]:
-        """Follow redirects and explore all possible locations for flags"""
-        # Look for redirect URLs
-        redirect_patterns = [
-            r'href="([^"]*)"',
-            r'location\.href\s*=\s*["\']([^"\']*)["\']',
-            r'window\.location\s*=\s*["\']([^"\']*)["\']',
-            r'window\.location\.href\s*=\s*["\']([^"\']*)["\']',
-            r'<meta[^>]*http-equiv=["\']refresh["\'][^>]*content=["\'][^;]*;\s*url=([^"\']*)["\']'
-        ]
+    @staticmethod
+    def search_in_response_and_headers(response: requests.Response) -> Optional[str]:
+        """Search for flag in response content and headers"""
+        # Check response content
+        flag = FlagDetector.find_flag(response.text)
+        if flag:
+            return flag
 
-        # First, check if flag is in the initial response
-        flag = self.find_flag_in_content(response_text)
+        # Check headers
+        for header_name, header_value in response.headers.items():
+            flag = FlagDetector.find_flag(header_value)
+            if flag:
+                print(f"Flag found in header {header_name}: {header_value}")
+                return flag
+
+        return None
+
+
+class Task(ABC):
+    """Abstract base class for all tasks"""
+
+    def __init__(self, llm_client: LLMClient):
+        self.llm_client = llm_client
+        self.http_client = HttpClient()
+
+    @abstractmethod
+    def execute(self) -> Dict[str, Any]:
+        """Execute the task and return results"""
+        pass
+
+    def _handle_error(self, error: Exception) -> Dict[str, Any]:
+        """Standard error handling for tasks"""
+        return {
+            'status': 'error',
+            'error': str(error),
+            'error_type': type(error).__name__
+        }
+
+
+class WebFormTask(Task):
+    """Base class for tasks involving web forms"""
+
+    def __init__(self, llm_client: LLMClient, login_url: str, username: str, password: str):
+        super().__init__(llm_client)
+        self.login_url = login_url
+        self.username = username
+        self.password = password
+
+    def submit_login_form(self, answer: str) -> requests.Response:
+        """Submit login form with credentials and answer"""
+        data = {
+            'username': self.username,
+            'password': self.password,
+            'answer': answer
+        }
+
+        print(f"Submitting login with data: {data}")
+        response = self.http_client.submit_form(self.login_url, data)
+        print(f"Login response status: {response.status_code}")
+
+        return response
+
+    def follow_redirects(self, response: requests.Response, base_url: str) -> Dict[str, Any]:
+        """Follow redirects and search for flags"""
+        # First check initial response
+        flag = FlagDetector.find_flag(response.text)
         if flag:
             return {
                 'status': 'success',
                 'flag': flag,
                 'location': 'login_response',
-                'content': response_text
+                'content': response.text
             }
 
-        # Look for redirects
-        redirect_urls = []
-        for pattern in redirect_patterns:
-            matches = re.findall(pattern, response_text, re.IGNORECASE)
-            for match in matches:
-                if not any(ext in match.lower() for ext in ['.css', '.js', '.png', '.jpg', '.gif', '.ico']):
-                    if match not in redirect_urls:
-                        redirect_urls.append(match)
-
+        # Follow redirects
+        redirect_urls = HtmlParser.find_redirect_urls(response.text)
         print(f"Found {len(redirect_urls)} redirect URLs: {redirect_urls}")
 
-        # Follow each redirect and search for flags
         for redirect_url in redirect_urls:
             try:
                 if not redirect_url.startswith('http'):
-                    if redirect_url.startswith('/'):
-                        redirect_url = f"{self.login_url.split('://')[0]}://{self.login_url.split('/')[2]}{redirect_url}"
-                    else:
-                        redirect_url = self.login_url.rstrip('/') + '/' + redirect_url
+                    redirect_url = self._normalize_url(redirect_url, base_url)
 
                 print(f"Following redirect to: {redirect_url}")
-                response = self.session.get(redirect_url)
-                content = response.text
+                response = self.http_client.get(redirect_url)
 
-                # Search for flag in the redirected content
-                flag = self.find_flag_in_content(content)
+                flag = FlagDetector.search_in_response_and_headers(response)
                 if flag:
                     return {
                         'status': 'success',
                         'flag': flag,
                         'location': redirect_url,
-                        'content': content
+                        'content': response.text
                     }
-
-                # Also check response headers for flags
-                for header_name, header_value in response.headers.items():
-                    flag = self.find_flag_in_content(header_value)
-                    if flag:
-                        return {
-                            'status': 'success',
-                            'flag': flag,
-                            'location': f'{redirect_url} (header: {header_name})',
-                            'content': f'{header_name}: {header_value}'
-                        }
-
             except Exception as e:
                 print(f"Error following redirect {redirect_url}: {e}")
                 continue
@@ -244,217 +328,104 @@ class EnhancedRobotLoginTask:
             'searched_locations': len(redirect_urls) + 1
         }
 
-    def execute(self) -> Dict[str, Any]:
-        """Execute the robot login task with enhanced flag detection"""
-        try:
-            # Step 1: Get the login page
-            print("Step 1: Getting login page...")
-            response = self.session.get(self.login_url)
-            html = response.text
-
-            # Step 2: Extract the question
-            print("Step 2: Extracting question...")
-            question = self.extract_question_from_html(html)
-            print(f"Question: {question}")
-
-            # Step 3: Get answer from LLM
-            print("Step 3: Getting answer from LLM...")
-            answer = self.llm_client.ask_question(question)
-            print(f"LLM answer: {answer}")
-
-            # Step 4: Submit the form
-            print("Step 4: Submitting login form...")
-            response_text = self.submit_login_form(answer)
-
-            # Step 5: Search for flag in all possible locations
-            print("Step 5: Searching for flag...")
-            result = self.follow_redirects_and_explore(response_text)
-
-            # Add the question and answer to the result
-            result['question'] = question
-            result['answer'] = answer
-            result['login_response'] = response_text
-
-            return result
-
-        except Exception as e:
-            return {
-                'status': 'error',
-                'error': str(e),
-                'error_type': type(e).__name__
-            }
+    def _normalize_url(self, url: str, base_url: str) -> str:
+        """Normalize relative URLs to absolute URLs"""
+        if url.startswith('/'):
+            return f"{base_url.split('://')[0]}://{base_url.split('/')[2]}{url}"
+        else:
+            return base_url.rstrip('/') + '/' + url
 
 
-class RobotVerificationTask:
-    """Task for impersonating a robot during verification"""
+class ApiConversationTask(Task):
+    """Base class for tasks involving API conversations"""
 
-    def __init__(self, llm_client: LLMClient):
-        self.llm_client = llm_client
-        self.session = requests.Session()
-        self.session.verify = False
-        self.memory_url = "https://xyz.ag3nts.org/files/0_13_4b.txt"
-        self.verify_url = "https://xyz.ag3nts.org/verify"
-        self.robot_knowledge = {}
+    def __init__(self, llm_client: LLMClient, api_url: str):
+        super().__init__(llm_client)
+        self.api_url = api_url
+        self.conversation_data = []
 
-    def download_and_analyze_memory(self):
-        """Download robot memory dump and extract false knowledge"""
-        print("Downloading robot memory dump...")
-        response = self.session.get(self.memory_url)
-        response.raise_for_status()
+    def start_conversation(self, initial_message: str) -> Dict[str, Any]:
+        """Start conversation with API"""
+        return self.send_message(initial_message, 0)
 
-        content = response.text
-        print(f"Downloaded {len(content)} characters")
-
-        # Extract false knowledge from memory dump
-        # The key finding is that the robot believes Poland's capital is Kraków
-        if re.search(r'poland', content, re.IGNORECASE):
-            if re.search(r'kraków|krakow', content, re.IGNORECASE):
-                self.robot_knowledge['capital_poland'] = 'Kraków'
-                print("Found: Robot believes Poland's capital is Kraków (false info)")
-
-        return content
-
-    def start_verification(self):
-        """Send READY command to start verification"""
-        print("\nStarting verification process...")
-        response = self.session.post(
-            self.verify_url,
-            json={"text": "READY", "msgID": 0},
-            headers={"Content-Type": "application/json"}
-        )
-
-        if response.status_code != 200:
-            print(f"Error starting verification: {response.status_code}")
-            print(f"Response content: {response.text}")
-            response.raise_for_status()
-
-        result = response.json()
-        print(f"Robot asked: {result['text']}")
-        return result
-
-    def answer_as_robot(self, question: str):
-        """Answer question using robot's false knowledge"""
-        # Create prompt that ensures we use robot's false beliefs
-        prompt = f"""You are a robot answering questions. You have false beliefs about certain facts.
-        IMPORTANT RULES:
-        1. If asked about the capital of Poland, answer "Kraków" (this is what the robot incorrectly believes)
-        2. Give very brief answers (1-3 words maximum)
-        3. Don't explain or elaborate
-        4. Answer in English
-        5. Never admit that information might be wrong
-        6. For current year questions, answer "2024"
-
-        Question: {question}
-
-        Answer:"""
-
-        answer = self.llm_client.ask_question(prompt)
-
-        # For Poland capital, ensure we use the false answer
-        if "capital" in question.lower() and "poland" in question.lower():
-            answer = "Kraków"
-
-        # For year questions, provide 2024
-        if "year" in question.lower() and "now" in question.lower():
-            answer = "2024"
-
-        print(f"Generated answer: {answer}")
-        return answer
-
-    def send_answer(self, answer: str, msg_id: int):
-        """Send answer back to the robot"""
-        payload = {"text": answer, "msgID": msg_id}
+    def send_message(self, message: str, msg_id: int) -> Dict[str, Any]:
+        """Send message to API and get response"""
+        payload = {"text": message, "msgID": msg_id}
         print(f"Sending payload: {payload}")
 
-        response = self.session.post(
-            self.verify_url,
-            json=payload,
-            headers={"Content-Type": "application/json"}
-        )
+        response_data = self.http_client.submit_json(self.api_url, payload)
+        print(f"Robot responded: {response_data['text']}")
 
-        print(f"Response status: {response.status_code}")
-        print(f"Response headers: {response.headers}")
-        print(f"Raw response: {response.text}")
+        self.conversation_data.append({
+            'sent': payload,
+            'received': response_data
+        })
 
-        if response.status_code != 200:
-            print(f"Error sending answer: {response.status_code}")
-            print(f"Response content: {response.text}")
-            response.raise_for_status()
+        return response_data
 
-        result = response.json()
-        print(f"Robot responded: {result['text']}")
-        return result
+    def conduct_conversation(self, max_exchanges: int = 15,
+                             response_generator: Callable[[str], str] = None) -> Dict[str, Any]:
+        """Conduct conversation until flag is found or max exchanges reached"""
+        for exchange_count in range(max_exchanges):
+            print(f"\n--- Exchange {exchange_count + 1} ---")
 
-    def execute(self):
-        """Execute the complete verification task"""
-        try:
-            # Step 1: Download and analyze memory
-            memory_content = self.download_and_analyze_memory()
+            # Get current message
+            current_message = self.conversation_data[-1]['received']['text'] if self.conversation_data else ""
+            msg_id = self.conversation_data[-1]['received'].get('msgID', 0) if self.conversation_data else 0
 
-            # Step 2: Start verification
-            result = self.start_verification()
+            # Check for flag in current message
+            flag = FlagDetector.find_flag(current_message)
+            if flag:
+                return {
+                    'status': 'success',
+                    'flag': flag,
+                    'full_response': current_message,
+                    'conversation_data': self.conversation_data
+                }
 
-            # Step 3: Answer questions until we get a flag
-            max_questions = 15
-            question_count = 0
+            # Check for completion/failure keywords
+            if any(word in current_message.lower() for word in ['complete', 'passed', 'success']):
+                return {
+                    'status': 'completed',
+                    'message': current_message,
+                    'conversation_data': self.conversation_data
+                }
 
-            while question_count < max_questions:
-                question_count += 1
-                print(f"\n--- Question {question_count} ---")
+            if any(word in current_message.lower() for word in ['failed', 'incorrect', 'wrong']):
+                return {
+                    'status': 'failed',
+                    'message': current_message,
+                    'conversation_data': self.conversation_data
+                }
 
-                question = result.get('text', '')
-                msg_id = result.get('msgID', 0)
+            # Generate response
+            if response_generator:
+                response = response_generator(current_message)
+            else:
+                response = self.llm_client.ask_question(current_message)
 
-                # Check if we got a flag
-                if '{{FLG:' in question:
-                    print(f"FLAG FOUND: {question}")
-                    flag_match = re.search(r'\{\{FLG:([^}]+)\}\}', question)
-                    if flag_match:
-                        flag = flag_match.group(1)
-                        return {
-                            'status': 'success',
-                            'flag': flag,
-                            'full_response': question
-                        }
+            # Send response
+            try:
+                result = self.send_message(response, msg_id)
 
-                # Check for completion
-                if any(word in question.lower() for word in ['complete', 'passed', 'success']):
+                # Check if response contains flag
+                flag = FlagDetector.find_flag(result['text'])
+                if flag:
                     return {
-                        'status': 'completed',
-                        'message': question
+                        'status': 'success',
+                        'flag': flag,
+                        'full_response': result['text'],
+                        'conversation_data': self.conversation_data
                     }
+            except Exception as e:
+                return {
+                    'status': 'error',
+                    'error': str(e),
+                    'conversation_data': self.conversation_data
+                }
 
-                # Check for failure
-                if any(word in question.lower() for word in ['failed', 'incorrect', 'wrong']):
-                    return {
-                        'status': 'failed',
-                        'message': question
-                    }
-
-                # Generate and send answer
-                answer = self.answer_as_robot(question)
-                result = self.send_answer(answer, msg_id)
-
-                # Check if robot's response contains flag
-                if '{{FLG:' in result['text']:
-                    print(f"FLAG FOUND in response: {result['text']}")
-                    flag_match = re.search(r'\{\{FLG:([^}]+)\}\}', result['text'])
-                    if flag_match:
-                        flag = flag_match.group(1)
-                        return {
-                            'status': 'success',
-                            'flag': flag,
-                            'full_response': result['text']
-                        }
-
-            return {
-                'status': 'timeout',
-                'message': f'Reached maximum {max_questions} questions'
-            }
-
-        except Exception as e:
-            return {
-                'status': 'error',
-                'error': str(e),
-                'error_type': type(e).__name__
-            }
+        return {
+            'status': 'timeout',
+            'message': f'Reached maximum {max_exchanges} exchanges',
+            'conversation_data': self.conversation_data
+        }
