@@ -22,7 +22,7 @@ class LLMClient:
             raise ValueError("OpenAI API key not provided")
         self.client = openai.OpenAI(api_key=api_key)
 
-    def ask_question(self, question: str, model: str = "gpt-4", max_tokens: int = 50) -> str:
+    def ask_question(self, question: str, model: str = "gpt-4o", max_tokens: int = 50) -> str:
         """Ask a question to the LLM and get an answer"""
         system_prompt = """You are a helpful assistant. Answer questions directly and concisely.
         Rules:
@@ -45,7 +45,7 @@ class LLMClient:
         answer = response.choices[0].message.content.strip()
         return self._clean_answer(answer, question)
 
-    def answer_with_context(self, question: str, context: str, model: str = "gpt-4", max_tokens: int = 50) -> str:
+    def answer_with_context(self, question: str, context: str, model: str = "gpt-4o", max_tokens: int = 50) -> str:
         """Answer a question with specific context/instructions"""
         response = self.client.chat.completions.create(
             model=model,
