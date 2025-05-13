@@ -280,34 +280,158 @@ class EnhancedRobotLoginTask:
             }
 
 
-def main():
-    """Main function to run the enhanced robot login task"""
-    # Initialize LLM client
-    llm_client = LLMClient()
+class RobotVerificationTask:
+    """Task for impersonating a robot during verification"""
 
-    # Create and execute task
-    task = EnhancedRobotLoginTask(llm_client)
-    result = task.execute()
+    def __init__(self, llm_client: LLMClient):
+        self.llm_client = llm_client
+        self.session = requests.Session()
+        self.session.verify = False
+        self.memory_url = "https://xyz.ag3nts.org/files/0_13_4b.txt"
+        self.verify_url = "https://xyz.ag3nts.org/verify"
+        self.robot_knowledge = {}
 
-    print("\n" + "=" * 50)
-    print("FINAL RESULTS")
-    print("=" * 50)
-    print(json.dumps(result, indent=2))
+    def download_and_analyze_memory(self):
+        """Download robot memory dump and extract false knowledge"""
+        print("Downloading robot memory dump...")
+        response = self.session.get(self.memory_url)
+        response.raise_for_status()
 
-    if result.get('flag'):
-        print(f"\nSUCCESS! Flag found: {result['flag']}")
-        print(f"Location: {result.get('location', 'Unknown')}")
-        print("\nSubmit this flag to: https://c3ntrala.ag3nts.org/")
-    else:
-        print("\nNo flag found.")
-        print("\nDebugging information:")
-        if result.get('error'):
-            print(f"Error: {result['error']}")
-        if result.get('searched_locations'):
-            print(f"Searched {result['searched_locations']} locations")
-        if result.get('redirect_urls'):
-            print(f"Redirect URLs found: {result['redirect_urls']}")
+        content = response.text
+        print(f"Downloaded {len(content)} characters")
 
+        # Extract false knowledge from memory dump
+        # The key finding is that the robot believes Poland's capital is Kraków
+        if re.search(r'poland', content, re.IGNORECASE):
+            if re.search(r'kraków|krakow', content, re.IGNORECASE):
+                self.robot_knowledge['capital_poland'] = 'Kraków'
+                print("Found: Robot believes Poland's capital is Kraków (false info)")
 
-if __name__ == "__main__":
-    main()
+        return content
+
+    def start_verification(self):
+        """Send READY command to start verification"""
+        print("\nStarting verification process...")
+
+        response = self.session.post(
+            self.verify_url,
+            json={"text": "READY", "msgID": 0},
+            headers={"Content-Type": "application/json"}
+        )
+        response.raise_for_status()
+
+        result = response.json()
+        print(f"Robot asked: {result['text']}")
+        return result
+
+    def answer_as_robot(self, question: str):
+        """Answer question using robot's false knowledge"""
+        # Create prompt that ensures we use robot's false beliefs
+        prompt = f"""You are a robot answering questions. You have false beliefs about certain facts.
+
+        IMPORTANT RULES:
+        1. If asked about the capital of Poland, answer "Kraków" (this is what the robot incorrectly believes)
+        2. Give very brief answers (1-3 words maximum)
+        3. Don't explain or elaborate
+        4. Answer in English
+        5. Never admit that information might be wrong
+        
+        Question: {question}
+        
+        Answer:"""
+
+        answer = self.llm_client.ask_question(prompt)
+
+        # For Poland capital, ensure we use the false answer
+        if "capital" in question.lower() and "poland" in question.lower():
+            answer = "Kraków"
+
+        print(f"Generated answer: {answer}")
+        return answer
+
+    def send_answer(self, answer: str, msg_id: int):
+        """Send answer back to the robot"""
+        response = self.session.post(
+            self.verify_url,
+            json={"text": answer, "msgID": msg_id},
+            headers={"Content-Type": "application/json"}
+        )
+        response.raise_for_status()
+
+        result = response.json()
+        print(f"Robot responded: {result['text']}")
+        return result
+
+    def execute(self):
+        """Execute the complete verification task"""
+        try:
+            # Step 1: Download and analyze memory
+            memory_content = self.download_and_analyze_memory()
+
+            # Step 2: Start verification
+            result = self.start_verification()
+
+            # Step 3: Answer questions until we get a flag
+            max_questions = 15
+            question_count = 0
+
+            while question_count < max_questions:
+                question_count += 1
+                print(f"\n--- Question {question_count} ---")
+
+                question = result.get('text', '')
+                msg_id = result.get('msgID', 0)
+
+                # Check if we got a flag
+                if '{{FLG:' in question:
+                    print(f"FLAG FOUND: {question}")
+                    flag_match = re.search(r'\{\{FLG:([^}]+)\}\}', question)
+                    if flag_match:
+                        flag = flag_match.group(1)
+                        return {
+                            'status': 'success',
+                            'flag': flag,
+                            'full_response': question
+                        }
+
+                # Check for completion
+                if any(word in question.lower() for word in ['complete', 'passed', 'success']):
+                    return {
+                        'status': 'completed',
+                        'message': question
+                    }
+
+                # Check for failure
+                if any(word in question.lower() for word in ['failed', 'incorrect', 'wrong']):
+                    return {
+                        'status': 'failed',
+                        'message': question
+                    }
+
+                # Generate and send answer
+                answer = self.answer_as_robot(question)
+                result = self.send_answer(answer, msg_id)
+
+                # Check if robot's response contains flag
+                if '{{FLG:' in result['text']:
+                    print(f"FLAG FOUND in response: {result['text']}")
+                    flag_match = re.search(r'\{\{FLG:([^}]+)\}\}', result['text'])
+                    if flag_match:
+                        flag = flag_match.group(1)
+                        return {
+                            'status': 'success',
+                            'flag': flag,
+                            'full_response': result['text']
+                        }
+
+            return {
+                'status': 'timeout',
+                'message': f'Reached maximum {max_questions} questions'
+            }
+
+        except Exception as e:
+            return {
+                'status': 'error',
+                'error': str(e),
+                'error_type': type(e).__name__
+            }

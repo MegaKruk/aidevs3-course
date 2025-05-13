@@ -36,7 +36,7 @@ def main():
             print(f"Redirect URL: {result.get('redirect_url')}")
 
         if result.get('flag'):
-            print(f"\n🎉 SUCCESS! Flag found: {result.get('flag')}")
+            print(f"\nSUCCESS! Flag found: {result.get('flag')}")
 
             # Initialize centrala client
             centrala = CentralaClient()
