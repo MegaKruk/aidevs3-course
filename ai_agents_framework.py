@@ -111,6 +111,25 @@ class HttpClient:
         return response.json()
 
 
+class ExpressionEvaluator:
+    """Utility for safely evaluating simple arithmetic expressions ( + – * / and parentheses )."""
+
+    _allowed = re.compile(r'^[\d+\-*/().\s]+$')
+
+    @staticmethod
+    def safe_eval(expression: str) -> int | float:
+        if not ExpressionEvaluator._allowed.match(expression.strip()):
+            raise ValueError(f"Disallowed characters in expression: {expression!r}")
+
+        # Evaluate in a completely empty environment
+        result = eval(expression, {"__builtins__": {}}, {})
+        # Normalise 3.0 → 3
+        if isinstance(result, float) and result.is_integer():
+            return int(result)
+        return result
+
+
+
 class HtmlParser:
     """Utility class for parsing HTML content"""
 
