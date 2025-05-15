@@ -68,8 +68,8 @@ class RobotNavigationAuto(Task):
             CACHE_FILE.write_text(ascii_grid, encoding="utf-8")
 
             # 3) najkrótsza trasa + prompt
-            # directions = PathFinder.astar(ascii_grid)
-            directions = ['UP', 'UP', 'DOWN', 'DOWN', 'LEFT', 'RIGHT', 'LEFT', 'RIGHT',]  # konami code
+            directions = PathFinder.astar(ascii_grid)
+            # directions = ['UP', 'UP', 'DOWN', 'DOWN', 'LEFT', 'RIGHT', 'LEFT', 'RIGHT',]  # konami code
             encoded    = self._dirs_to_letters(directions)
             prompt     = self._build_prompt(ascii_grid, encoded)
 
