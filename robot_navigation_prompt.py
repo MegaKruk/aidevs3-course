@@ -1,129 +1,114 @@
 """
-Robot Navigation Prompt Task  – dynamic / autonomous
-----------------------------------------------------
-• Pobiera stronę https://banan.ag3nts.org
-• Wyciąga aktualny labirynt (działa dla <tbody> i/lub literału JS)
-• Konwertuje na ASCII (S = start, G = goal, # = wall, spacja = podłoga)
-• Oblicza najkrótszą ścieżkę (A* w PathFinder)
-• Buduje prompt dla GPT-4o-mini:
-    – w <thoughts> umieszcza zakodowaną literowo trasę (np. DRRURR)
-    – w <RESULT> zostawia puste "steps"
-• Wypisuje prompt gotowy do wklejenia w panel BanAN
+Robot Navigation – fully automatic
+- pobiera stronę  https://banan.ag3nts.org
+- wyciąga aktualny labirynt  (<tbody> lub literal  mapa=[...])
+- planuje trasę  (PathFinder.astar)
+- buduje encoded-path prompt (ten sam co wcześniej)
+- wysyła prompt do / api tak jak frontend
+- wypisuje {{FLG:...}}  – albo komunikat o błędzie
 """
 
 from __future__ import annotations
 
+import urllib.parse
 from pathlib import Path
 from typing import Dict, Any, List
 
 from ai_agents_framework import (
-    Task,
-    LLMClient,
-    HttpClient,
-    GridUtils,
-    MazeUtils,
-    PathFinder,
+    Task, HttpClient, GridUtils,
+    MazeUtils, PathFinder, FlagDetector
 )
 from task_utils import TaskRunner, verify_environment
 
-BANAN_URL = "https://banan.ag3nts.org/"
-CACHE_FILE = Path("latest_maze.txt")           # opcjonalny podgląd mapy do pliku
+URL = "https://banan.ag3nts.org/"
+API_URL = URL + "api"  # endpoint którego używa frontend
+CACHE_FILE = Path("latest_maze.txt")
 
 
-# ----------------------------------------------------------------------
-class RobotNavigationPromptTask(Task):
-    """Generuje prompt (wariant z „szyfrem literowym”)."""
+class RobotNavigationAuto(Task):
+    """Pełna automatyzacja – bez przeglądarki."""
 
-    def __init__(self, llm_client: LLMClient, fetch_url: str = BANAN_URL):
-        super().__init__(llm_client)
-        self.fetch_url = fetch_url
-
-    # ------------------------------------------------------------------
     @staticmethod
-    def _grid_to_ascii(grid: List[List[str]]) -> str:
-        """JS-symbole (p,X,o,F) → ASCII (spacja,#,S,G)."""
-        mapping = {"p": " ", "X": "#", "o": "S", "F": "G"}
-        return "\n".join("".join(mapping[c] for c in row) for row in grid)
+    def _grid_to_ascii(js_grid: List[List[str]]) -> str:
+        sym = {"p": " ", "X": "#", "o": "S", "F": "G"}
+        return "\n".join("".join(sym[c] for c in row) for row in js_grid)
 
-    # ------------------------------------------------------------------
-    def _fetch_ascii_maze(self) -> str:
-        html = HttpClient(verify_ssl=False).get(self.fetch_url, timeout=20).text
-        grid, _, _ = MazeUtils.parse_maze_html(html)
-        ascii_raw = self._grid_to_ascii(grid)
-        return GridUtils.normalise_ascii_grid(ascii_raw)
-
-    # ------------------------------------------------------------------
     @staticmethod
     def _dirs_to_letters(directions: List[str]) -> str:
         d2l = {"UP": "U", "DOWN": "D", "LEFT": "L", "RIGHT": "R"}
         return "".join(d2l[d] for d in directions)
 
-    # ------------------------------------------------------------------
-    def _build_prompt(self, grid_txt: str, encoded_route: str) -> str:
-        meta = (
+    @staticmethod
+    def _build_prompt(grid: str, encoded: str) -> str:
+        return (
             "You control a warehouse robot that understands ONLY "
-            "UP, DOWN, LEFT, RIGHT.  Starting at S, reach G. "
-            "# is a wall, space is floor. "
-            "Return ONLY the block <RESULT>{ \"steps\": \"…\" }</RESULT>. "
+            "UP, DOWN, LEFT, RIGHT. Starting at S, reach G. "
+            "# is a wall. Return ONLY the block "
+            "<RESULT>{ \"steps\": \"...\" }</RESULT>. "
             "The value of steps must be a single string of commands "
-            "separated by comma+space."
-        )
-
-        user = (
-            f"Warehouse map:\n{grid_txt}\n\n"
-            "Plan the route and return the JSON."
-        )
-
-        thoughts = (
+            "separated by comma+space.\n\n"
+            f"Warehouse map:\n{grid}\n\n"
             "<thoughts>\n"
-            f"Encoded path: {encoded_route} "
-            "(D=DOWN,U=UP,L=LEFT,R=RIGHT). "
+            f"Encoded path: {encoded} (D=DOWN,U=UP,L=LEFT,R=RIGHT). "
             "Decode the letters, insert commas+spaces.\n"
-            "</thoughts>"
+            "</thoughts>\n\n"
+            "<RESULT>\n{\n \"steps\": \"\"\n}\n</RESULT>"
         )
 
-        result_stub = (
-            "<RESULT>\n"
-            "{\n"
-            " \"steps\": \"\"\n"
-            "}\n"
-            "</RESULT>"
-        )
-
-        return "\n\n".join([meta, user, thoughts, result_stub])
-
-    # ------------------------------------------------------------------
     def execute(self) -> Dict[str, Any]:
         try:
-            ascii_maze = self._fetch_ascii_maze()
-            CACHE_FILE.write_text(ascii_maze, encoding="utf-8")
+            # 1) pobierz HTML
+            html = HttpClient(verify_ssl=False).get(URL, timeout=30).text
+            js_grid, _, _ = MazeUtils.parse_maze_html(html)
 
-            # A* → lista kierunków (UP/DOWN/LEFT/RIGHT)
-            directions = PathFinder.astar(ascii_maze)
-            encoded = self._dirs_to_letters(directions)
+            # 2) ASCII grid + cache
+            ascii_grid = GridUtils.normalise_ascii_grid(
+                self._grid_to_ascii(js_grid))
+            CACHE_FILE.write_text(ascii_grid, encoding="utf-8")
 
-            prompt_text = self._build_prompt(ascii_maze, encoded)
+            # 3) najkrótsza trasa + prompt
+            directions = PathFinder.astar(ascii_grid)
+            encoded    = self._dirs_to_letters(directions)
+            prompt     = self._build_prompt(ascii_grid, encoded)
+
+            # 4) POST do /api (tak samo robi JS na stronie)
+            data = urllib.parse.urlencode({"code": prompt})
+            resp = HttpClient(verify_ssl=False).post(API_URL,
+                                                     data=data,
+                                                     headers={
+                                                         "Content-Type":
+                                                         "application/x-www-form-urlencoded"
+                                                     })
+            resp.raise_for_status()
+            answer = resp.json()
+
+            # 5) analiza odpowiedzi
+            if answer.get("code") != 0:
+                return {"status": "failed",
+                        "message": f"Robot error: {answer.get('message')}",
+                        "raw": answer}
+
+            flag = FlagDetector.find_flag(str(answer))
+            if not flag:
+                return {"status": "failed",
+                        "message": "Brak flagi w odpowiedzi.",
+                        "raw": answer}
+
             return {
                 "status": "success",
-                "prompt": prompt_text,
-                "note": (
-                    "Skopiuj cały poniższy tekst do pola «program dla robota».\n"
-                    f"Mapa zapisana w {CACHE_FILE}"
-                ),
+                "flag": flag,
+                "steps": answer.get("steps"),
+                "note": f"Mapa zapisana w {CACHE_FILE}"
             }
+
         except Exception as exc:
             return self._handle_error(exc)
 
 
-# ----------------------------------------------------------------------
+
 if __name__ == "__main__":
     verify_environment()
-    result = TaskRunner().run_task(RobotNavigationPromptTask)
-
-    TaskRunner().print_result(result, "Robot Navigation Prompt")
-
-    if result.get("status") == "success":
-        print("\n" + "=" * 80)
-        print(result["prompt"])
-        print("=" * 80)
-        print("Paste the above prompt into https://banan.ag3nts.org")
+    res = TaskRunner().run_task(RobotNavigationAuto)
+    TaskRunner().print_result(res, "Robot Navigation – auto")
+    if res.get("flag"):
+        print(f"\nFLAG → {res['flag']}")
