@@ -1,15 +1,22 @@
 import requests
 import re
 import os
-from typing import Dict, Any, Optional, List, Callable
+from typing import Dict, Any, Optional, List, Callable, Tuple, Set
 from abc import ABC, abstractmethod
-import urllib3
+from html.parser import HTMLParser as StdHTMLParser
+from html import unescape
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
+import urllib3
 import openai
+import textwrap
+import json
 
 # Disable SSL warnings for the course
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
+
+Coordinate = Tuple[int, int]
 
 
 class LLMClient:
@@ -259,6 +266,229 @@ class FlagDetector:
                 return flag
 
         return None
+
+
+class GridUtils:
+    """Helper functions for ASCII-map based tasks."""
+
+    @staticmethod
+    def normalise_ascii_grid(txt: str) -> str:
+        """Strip common indentation + trailing spaces; pad rows to equal width."""
+        lines = [ln.rstrip() for ln in textwrap.dedent(txt).splitlines() if ln.strip()]
+        width = max(len(ln) for ln in lines)
+        return "\n".join(ln.ljust(width) for ln in lines)
+
+    @staticmethod
+    def grid_to_coordinate_list(grid: str) -> Tuple[Tuple[int, int], Tuple[int, int], Set[Tuple[int, int]]]:
+        """
+        Return (start, goal, walls) where each coordinate is (row, col).
+
+        Symbols:
+            S … robot start
+            G … goal / computer
+            # … wall
+            space … free floor
+        """
+        start = goal = None
+        walls: Set[Tuple[int, int]] = set()
+
+        for r, line in enumerate(grid.splitlines()):
+            for c, ch in enumerate(line):
+                if ch == 'S':
+                    start = (r, c)
+                elif ch == 'G':
+                    goal = (r, c)
+                elif ch == '#':
+                    walls.add((r, c))
+
+        if start is None or goal is None:
+            raise ValueError("Grid must contain exactly one 'S' and one 'G'.")
+        return start, goal, walls
+
+
+class PathFinder:
+    """
+    A*-based pathfinder that works on the tiny 2-D grids we get from BanAN
+      • grid  – string created by GridUtils.normalise_ascii_grid
+      • returns list of directions:  ["UP", "UP", "RIGHT", …]
+    """
+
+    DIRS: dict[Coordinate, str] = {
+        (-1, 0): "UP",
+        (1, 0): "DOWN",
+        (0, -1): "LEFT",
+        (0, 1): "RIGHT",
+    }
+
+    @staticmethod
+    def astar(grid_txt: str) -> list[str]:
+        start, goal, walls = GridUtils.grid_to_coordinate_list(grid_txt)
+
+        rows = len(grid_txt.splitlines())
+        cols = max(len(ln) for ln in grid_txt.splitlines())
+
+        def h(a: Coordinate, b: Coordinate) -> int:  # Manhattan
+            return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+        open_set: list[Coordinate] = [start]
+        came_from: dict[Coordinate, Coordinate] = {}
+
+        g: dict[Coordinate, int] = {start: 0}
+        f: dict[Coordinate, int] = {start: h(start, goal)}
+
+        while open_set:
+            current = min(open_set, key=f.get)
+            if current == goal:
+                return PathFinder._reconstruct(current, came_from)
+
+            open_set.remove(current)
+
+            for dv in PathFinder.DIRS:
+                nxt = (current[0] + dv[0], current[1] + dv[1])
+
+                if not (0 <= nxt[0] < rows and 0 <= nxt[1] < cols):
+                    continue  # poza planszę
+                if nxt in walls:
+                    continue  # w ścianę
+
+                tentative = g[current] + 1
+                if tentative < g.get(nxt, 1_000_000):
+                    came_from[nxt] = current
+                    g[nxt] = tentative
+                    f[nxt] = tentative + h(nxt, goal)
+                    if nxt not in open_set:
+                        open_set.append(nxt)
+
+        raise RuntimeError("Path not found.")
+
+    @staticmethod
+    def _reconstruct(node: Coordinate, came: dict[Coordinate, Coordinate]) -> list[str]:
+        path: list[str] = []
+        while node in came:
+            prev = came[node]
+            dv = (node[0] - prev[0], node[1] - prev[1])
+            path.append(PathFinder.DIRS[dv])
+            node = prev
+        return list(reversed(path))
+
+
+class MazeUtils:
+    """
+    Helpers for extracting the grid, the robot start and the goal position
+    from the BanAN control panel HTML.
+    """
+    _JS_MAP_RE = re.compile(r"mapa\s*=\s*(\[[\s\S]*?\]);", re.I)
+
+    @staticmethod
+    def parse_maze_html(html: str) -> Tuple[List[List[str]], Coordinate, Coordinate]:
+        """
+        Returns (grid, start_xy, goal_xy).
+
+        *grid* – list of rows, each row is list of cell chars
+                 'p' – plain; 'X' – wall; 'o' – robot; 'F' – goal
+        """
+        # --- 1) Table-based markup (older variant) ------------------------
+        soup = BeautifulSoup(html, "html.parser")
+        tbody = soup.find("tbody")
+        if tbody:
+            return MazeUtils._parse_from_tbody(tbody)
+
+        # --- 2) JavaScript literal (current variant) ----------------------
+        m = MazeUtils._JS_MAP_RE.search(html)
+        if not m:
+            raise RuntimeError("Neither <tbody> nor JS literal with 'mapa =' found.")
+        literal = m.group(1)
+        literal = unescape(literal)          # handle &quot; etc. (safety)
+        literal = literal.replace("'", '"')  # single → double quotes
+        grid: List[List[str]] = json.loads(literal)
+
+        robot = goal = None
+        for y, row in enumerate(grid):
+            for x, c in enumerate(row):
+                if c == "o":
+                    robot = (x, y)
+                elif c == "F":
+                    goal = (x, y)
+        if robot is None or goal is None:
+            raise RuntimeError("Robot or destination not found in grid.")
+        return grid, robot, goal
+
+    @staticmethod
+    def _parse_from_tbody(tbody) -> Tuple[List[List[str]], Coordinate, Coordinate]:
+        grid, robot, goal = [], None, None
+        for y, tr in enumerate(tbody.find_all("tr")):
+            row = []
+            for x, td in enumerate(tr.find_all("td")):
+                cls = td.get("class", [])
+                if "wall" in cls:
+                    row.append("X")
+                elif "robot" in cls:
+                    row.append("o")
+                    robot = (x, y)
+                elif "destination" in cls:
+                    row.append("F")
+                    goal = (x, y)
+                else:
+                    row.append("p")
+            grid.append(row)
+        if robot is None or goal is None:
+            raise RuntimeError("Robot or destination not found in table.")
+        return grid, robot, goal
+
+
+class _MazeHTMLParser(StdHTMLParser):
+    """
+    Ultra-light parser that converts the <tbody> grid returned by
+    banan.ag3nts.org into a list of lists of symbols.
+
+    Mapping of TD class → symbol
+        ''            → ' '   (floor)
+        'wall'        → '#'
+        'robot'       → 'S'
+        'destination' → 'G'
+    """
+
+    MAP = {
+        "": " ",
+        "wall": "#",
+        "robot": "S",
+        "destination": "G",
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.grid: List[List[str]] = []
+        self._row: List[str] = []
+        self._in_tbody = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "tbody":
+            self._in_tbody = True
+        if not self._in_tbody or tag != "td":
+            return
+
+        # extract `class`
+        cls = ""
+        for name, value in attrs:
+            if name == "class":
+                cls = value
+                break
+        self._row.append(self.MAP.get(cls, " "))
+
+    def handle_endtag(self, tag):
+        if tag == "tbody":
+            self._in_tbody = False
+        elif tag == "tr" and self._in_tbody:
+            self.grid.append(self._row)
+            self._row = []
+
+    @classmethod
+    def html_to_ascii(cls, html: str) -> str:
+        parser = cls()
+        parser.feed(html)
+        if not parser.grid:
+            raise ValueError("Maze table not found in HTML.")
+        return "\n".join("".join(r) for r in parser.grid)
 
 
 class Task(ABC):
