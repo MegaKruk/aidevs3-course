@@ -43,6 +43,13 @@ class RobotLoginTask(WebFormTask):
             print("Step 5: Searching for flag...")
             result = self.follow_redirects(response, self.login_url)
 
+            # zapisz HTML, w którym była flaga, aby podejrzeć ukryty link
+            html_with_flag = result.get("content")
+            if html_with_flag:
+                from pathlib import Path
+                Path("firmware_page.html").write_text(html_with_flag, encoding="utf‑8")
+                print("Zapisano firmware_page.html")
+
             # Add context to result
             result['question'] = question
             result['answer'] = answer
