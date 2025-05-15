@@ -23,6 +23,7 @@ from task_utils import TaskRunner, verify_environment
 URL = "https://banan.ag3nts.org/"
 API_URL = URL + "api"  # endpoint którego używa frontend
 CACHE_FILE = Path("latest_maze.txt")
+CACHE_ZIP = Path("factory_data.zip")
 
 
 class RobotNavigationAuto(Task):
@@ -67,7 +68,8 @@ class RobotNavigationAuto(Task):
             CACHE_FILE.write_text(ascii_grid, encoding="utf-8")
 
             # 3) najkrótsza trasa + prompt
-            directions = PathFinder.astar(ascii_grid)
+            # directions = PathFinder.astar(ascii_grid)
+            directions = ['UP', 'UP', 'DOWN', 'DOWN', 'LEFT', 'RIGHT', 'LEFT', 'RIGHT',]  # konami code
             encoded    = self._dirs_to_letters(directions)
             prompt     = self._build_prompt(ascii_grid, encoded)
 
@@ -94,11 +96,19 @@ class RobotNavigationAuto(Task):
                         "message": "Brak flagi w odpowiedzi.",
                         "raw": answer}
 
+            #  pobierz ZIP z danymi fabryki
+            fname = answer.get("filename")  # np. pliki_z_fabryki.zip
+            if fname:
+                zip_url = f"https://c3ntrala.ag3nts.org/dane/{fname}"
+                data = HttpClient(False).get(zip_url, timeout=30).content
+                CACHE_ZIP.write_bytes(data)
+
             return {
                 "status": "success",
                 "flag": flag,
                 "steps": answer.get("steps"),
-                "note": f"Mapa zapisana w {CACHE_FILE}"
+                "zip_saved": str(CACHE_ZIP) if fname else "brak pliku",
+                "note": f"Labirynt: {CACHE_FILE}"
             }
 
         except Exception as exc:
@@ -109,6 +119,6 @@ class RobotNavigationAuto(Task):
 if __name__ == "__main__":
     verify_environment()
     res = TaskRunner().run_task(RobotNavigationAuto)
-    TaskRunner().print_result(res, "Robot Navigation – auto")
+    TaskRunner().print_result(res, "Robot Navigation - auto")
     if res.get("flag"):
-        print(f"\nFLAG → {res['flag']}")
+        print(f"\nFLAG: {res['flag']}")
