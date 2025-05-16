@@ -678,3 +678,46 @@ class ApiConversationTask(Task):
             'message': f'Reached maximum {max_exchanges} exchanges',
             'conversation_data': self.conversation_data
         }
+
+
+class CentralaTask(Task):
+    """Base class for tasks that interact with Centrala API"""
+
+    def __init__(self, llm_client: LLMClient):
+        super().__init__(llm_client)
+        self.api_key = os.getenv('CENTRALA_API_KEY')
+        if not self.api_key:
+            raise ValueError("CENTRALA_API_KEY environment variable not set")
+
+        self.base_url = "https://c3ntrala.ag3nts.org"
+
+    def download_file(self, filename: str) -> str:
+        """Download a file from Centrala data endpoint"""
+        url = f"{self.base_url}/data/{self.api_key}/{filename}"
+        print(f"Downloading data from: {url}")
+        response = self.http_client.get(url)
+        response.raise_for_status()
+
+        # Check for any additional information in headers
+        print("Response headers:")
+        for key, value in response.headers.items():
+            print(f"{key}: {value}")
+
+        content = response.text
+        print(f"Downloaded content ({len(content)} characters)")
+        return content
+
+    def submit_report(self, task_name: str, answer: str) -> dict:
+        """Submit a report to Centrala"""
+        payload = {
+            "task": task_name,
+            "apikey": self.api_key,
+            "answer": answer
+        }
+
+        report_url = f"{self.base_url}/report"
+        print(f"Submitting to: {report_url}")
+        print(f"Payload: {payload}")
+
+        response_data = self.http_client.submit_json(report_url, payload)
+        return response_data
