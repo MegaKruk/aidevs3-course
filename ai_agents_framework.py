@@ -491,6 +491,59 @@ class _MazeHTMLParser(StdHTMLParser):
         return "\n".join("".join(r) for r in parser.grid)
 
 
+class AudioTranscription:
+    """Helper class for transcribing audio files"""
+
+    def __init__(self, api_key: Optional[str] = None):
+        """Initialize with OpenAI API key"""
+        if not api_key:
+            api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            raise ValueError("OpenAI API key not provided")
+        self.client = openai.OpenAI(api_key=api_key)
+
+    def transcribe_audio(self, file_path: str) -> str:
+        """Transcribe audio file using OpenAI Whisper API"""
+        print(f"Transcribing file: {file_path}")
+        try:
+            with open(file_path, "rb") as audio_file:
+                transcript = self.client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    language="pl"  # Polish language
+                )
+                return transcript.text
+        except Exception as e:
+            print(f"Error transcribing {file_path}: {e}")
+            return f"Error transcribing {os.path.basename(file_path)}: {str(e)}"
+
+    def transcribe_directory(self, directory_path: str, output_file: Optional[str] = None) -> Dict[str, str]:
+        """Transcribe all audio files in a directory"""
+        transcriptions = {}
+        supported_formats = ['.mp3', '.m4a', '.wav', '.mp4', '.webm', '.ogg']
+
+        files = [f for f in os.listdir(directory_path)
+                 if os.path.isfile(os.path.join(directory_path, f)) and
+                 any(f.lower().endswith(ext) for ext in supported_formats)]
+
+        for file_name in files:
+            file_path = os.path.join(directory_path, file_name)
+            transcriptions[file_name] = self.transcribe_audio(file_path)
+
+        # Save transcriptions to a file if output_file is provided
+        if output_file:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(transcriptions, f, ensure_ascii=False, indent=2)
+            print(f"Transcriptions saved to {output_file}")
+
+        return transcriptions
+
+    def load_transcriptions(self, file_path: str) -> Dict[str, str]:
+        """Load transcriptions from JSON file"""
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+
 class Task(ABC):
     """Abstract base class for all tasks"""
 
