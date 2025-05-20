@@ -1,6 +1,8 @@
 import requests
 import re
 import os
+import base64
+from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable, Tuple, Set
 from abc import ABC, abstractmethod
 from html.parser import HTMLParser as StdHTMLParser
@@ -78,6 +80,58 @@ class LLMClient:
                 return number_match.group(1)
 
         return answer
+
+
+class VisionClient:
+    """
+    Thin wrapper around OpenAI Vision (GPT-4o / gpt-4o-mini) that lets us send
+    one or many image files together with a textual prompt and returns the
+    model’s answer.
+    """
+
+    def __init__(self, api_key: Optional[str] = None):
+        if not api_key:
+            api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OpenAI API key not provided")
+        self.client = openai.OpenAI(api_key=api_key)
+
+    def ask_vision(
+        self,
+        image_paths: List[str],
+        prompt: str,
+        model: str = "gpt-4o",
+        max_tokens: int = 3000,
+        temperature: float = 0.0,
+    ) -> str:
+        """
+        • *image_paths* – list of local image files (jpg/png/webp…)
+        • *prompt*      – system+user instruction to accompany images
+
+        Returns model’s textual reply.
+        """
+        # Build messages with image parts (OpenAI “image_url” content)
+        content: List[Dict[str, Any]] = [
+            {"type": "text", "text": prompt.strip()}
+        ]
+        for path in image_paths:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/{Path(path).suffix.lstrip('.').lower()};base64,"
+                        + base64.b64encode(Path(path).read_bytes()).decode()
+                    },
+                }
+            )
+
+        resp = self.client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return resp.choices[0].message.content.strip()
 
 
 class HttpClient:
