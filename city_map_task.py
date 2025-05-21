@@ -25,7 +25,6 @@ TMP_DIR = Path("_map_crops"); TMP_DIR.mkdir(exist_ok=True)
 
 class CityMapTask(CentralaTask):
 
-    # ------------------------------------------------------------------
     @staticmethod
     def _green_boxes(img: Image.Image) -> List[Tuple[int, int, int, int]]:
         """Return (x1,y1,x2,y2) boxes of bright-green frames."""
@@ -63,7 +62,6 @@ class CityMapTask(CentralaTask):
             raise RuntimeError(f"Expected 4 frames, got {len(boxes)}")
         return boxes
 
-    # ------------------------------------------------------------------
     def _crop_fragments(self, img: Image.Image) -> List[Path]:
         paths = []
         for i, (x1,y1,x2,y2) in enumerate(self._green_boxes(img), 1):
@@ -72,12 +70,10 @@ class CityMapTask(CentralaTask):
             paths.append(p)
         return paths
 
-    # ------------------------------------------------------------------
     @staticmethod
     def _data_url(p: Path) -> str:
         return "data:image/png;base64," + base64.b64encode(p.read_bytes()).decode()
 
-    # ------------------------------------------------------------------
     def _ask_city(self, tag: str, img_path: Path) -> str:
         sys_msg = ("You analyse fragments of Polish city maps. "
                    "Think in <thinking>…</thinking> then finish with "
@@ -107,12 +103,10 @@ class CityMapTask(CentralaTask):
         print(f"[{tag}] -> {city}")
         return city
 
-    # ------------------------------------------------------------------
     @staticmethod
     def _norm(city: str) -> str:
         return unicodedata.normalize("NFKD", city).encode("ascii","ignore").decode().upper()
 
-    # ------------------------------------------------------------------
     def execute(self) -> Dict[str, str]:
         try:
             base  = Image.open(SRC_IMG)
@@ -137,7 +131,6 @@ class CityMapTask(CentralaTask):
             return self._handle_error(exc)
 
 
-# ----------------------------------------------------------------------
 if __name__ == "__main__":
     verify_environment()
     result = TaskRunner().run_task(CityMapTask)

@@ -598,6 +598,118 @@ class AudioTranscription:
             return json.load(f)
 
 
+class ImageGenerator:
+    """Utility class for generating images using DALL-E"""
+
+    def __init__(self, api_key: Optional[str] = None):
+        """Initialize with OpenAI API key"""
+        if not api_key:
+            api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            raise ValueError("OpenAI API key not provided")
+        self.client = openai.OpenAI(api_key=api_key)
+
+    def generate_image(self, prompt: str, model: str = "dall-e-3", size: str = "1024x1024") -> str:
+        """
+        Generate an image using DALL-E with the given prompt
+
+        Args:
+            prompt: The text description for image generation
+            model: The model to use (dall-e-3 or dall-e-2)
+            size: Image size (1024x1024, 1792x1024, or 1024x1792 for dall-e-3)
+                  (256x256, 512x512, or 1024x1024 for dall-e-2)
+
+        Returns:
+            URL of the generated image
+        """
+        print(f"Generating image with prompt: {prompt}")
+        try:
+            response = self.client.images.generate(
+                model=model,
+                prompt=prompt,
+                size=size,
+                quality="standard",
+                n=1,
+            )
+            image_url = response.data[0].url
+            print(f"Image generated successfully: {image_url}")
+            return image_url
+        except Exception as e:
+            print(f"Error generating image: {e}")
+            raise
+
+
+class PromptEnhancer:
+    """Utility class for enhancing prompts for image generation"""
+
+    @staticmethod
+    def enhance_robot_prompt(description: str) -> str:
+        """
+        Enhance a robot description prompt for better image generation results
+
+        Args:
+            description: The original robot description
+
+        Returns:
+            Enhanced prompt for image generation
+        """
+        enhancement_elements = [
+            "photorealistic, highly detailed",
+            "studio lighting, clear focus",
+            "industrial design, technical illustration style",
+            "neutral background to emphasize the robot's features",
+            "full body view showing all components clearly"
+        ]
+
+        # Add context to make the prompt more specific
+        enhanced_prompt = (
+            f"Create a detailed technical illustration of a robot with these exact specifications: {description}. "
+            f"The image should be {', '.join(enhancement_elements)}. "
+            f"Ensure all described features are clearly visible. "
+            f"This is for professional technical documentation purposes."
+        )
+
+        return enhanced_prompt
+
+    @staticmethod
+    def enhance_with_llm(llm_client: LLMClient, description: str, target_type: str = "robot") -> str:
+        """
+        Use LLM to enhance a prompt for better image generation
+
+        Args:
+            llm_client: Instance of LLMClient for API calls
+            description: The original description
+            target_type: Type of object to generate (robot, vehicle, etc.)
+
+        Returns:
+            Enhanced prompt for image generation
+        """
+        system_prompt = f"""
+        You are an expert prompt engineer for image generation AI. 
+        Your task is to enhance the given {target_type} description into a detailed, 
+        clear prompt that will generate high-quality, accurate images.
+
+        Guidelines:
+        - Maintain all details from the original description
+        - Add technical precision and clarity
+        - Specify photorealistic style with studio lighting
+        - Include relevant perspective information (full body view, etc.)
+        - Mention neutral background for clear focus on the {target_type}
+        - Keep the prompt concise and specific
+
+        Output only the enhanced prompt without explanations or notes.
+        """
+
+        response = llm_client.answer_with_context(
+            question=f"Original {target_type} description: {description}",
+            context=system_prompt,
+            model="gpt-4o",
+            max_tokens=500
+        )
+
+        return response.strip()
+
+
 class Task(ABC):
     """Abstract base class for all tasks"""
 
