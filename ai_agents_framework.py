@@ -1,7 +1,3 @@
-import requests
-import re
-import os
-import base64
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable, Tuple, Set
 from abc import ABC, abstractmethod
@@ -13,6 +9,13 @@ import urllib3
 import openai
 import textwrap
 import json
+import requests
+import re
+import os
+import base64
+import zipfile
+import tempfile
+import shutil
 
 # Disable SSL warnings for the course
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -31,7 +34,8 @@ class LLMClient:
             raise ValueError("OpenAI API key not provided")
         self.client = openai.OpenAI(api_key=api_key)
 
-    def ask_question(self, question: str, model: str = "gpt-4o", max_tokens: int = 50) -> str:
+    def ask_question(self, question: str, model: str = "gpt-4o",
+                     max_tokens: int = 50) -> str:
         """Ask a question to the LLM and get an answer"""
         system_prompt = """You are a helpful assistant. Answer questions directly and concisely.
         Rules:
@@ -54,7 +58,8 @@ class LLMClient:
         answer = response.choices[0].message.content.strip()
         return self._clean_answer(answer, question)
 
-    def answer_with_context(self, question: str, context: str, model: str = "gpt-4o", max_tokens: int = 50) -> str:
+    def answer_with_context(self, question: str, context: str,
+                            model: str = "gpt-4o", max_tokens: int = 50) -> str:
         """Answer a question with specific context/instructions"""
         response = self.client.chat.completions.create(
             model=model,
@@ -161,7 +166,8 @@ class HttpClient:
 
         return self.session.post(url, data=data, headers=default_headers)
 
-    def submit_json(self, url: str, data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    def submit_json(self, url: str, data: Dict[str, Any],
+                    headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """Submit JSON data and return JSON response"""
         default_headers = {"Content-Type": "application/json"}
         if headers:
@@ -571,7 +577,8 @@ class AudioTranscription:
             print(f"Error transcribing {file_path}: {e}")
             return f"Error transcribing {os.path.basename(file_path)}: {str(e)}"
 
-    def transcribe_directory(self, directory_path: str, output_file: Optional[str] = None) -> Dict[str, str]:
+    def transcribe_directory(self, directory_path: str,
+                             output_file: Optional[str] = None) -> Dict[str, str]:
         """Transcribe all audio files in a directory"""
         transcriptions = {}
         supported_formats = ['.mp3', '.m4a', '.wav', '.mp4', '.webm', '.ogg']
@@ -663,8 +670,8 @@ class PromptEnhancer:
 
         # Add context to make the prompt more specific
         enhanced_prompt = (
-            f"Create a detailed technical illustration of a robot with these exact specifications: {description}. "
-            f"The image should be {', '.join(enhancement_elements)}. "
+            f"Create a detailed technical illustration of a robot with these exact specifications: "
+            f"{description}. The image should be {', '.join(enhancement_elements)}. "
             f"Ensure all described features are clearly visible. "
             f"This is for professional technical documentation purposes."
         )
@@ -708,6 +715,163 @@ class PromptEnhancer:
         )
 
         return response.strip()
+
+
+class FileAnalyzer:
+    """Utility class for analyzing various file types"""
+
+    def __init__(self, llm_client: LLMClient, vision_client: VisionClient = None,
+                 audio_client: AudioTranscription = None):
+        self.llm_client = llm_client
+        self.vision_client = vision_client or VisionClient()
+        self.audio_client = audio_client or AudioTranscription()
+
+    def analyze_text_file(self, file_path: str) -> str:
+        """Read and return content of text file"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except UnicodeDecodeError:
+            # Try with different encodings
+            for encoding in ['latin-1', 'cp1252', 'iso-8859-1']:
+                try:
+                    with open(file_path, 'r', encoding=encoding) as f:
+                        return f.read()
+                except UnicodeDecodeError:
+                    continue
+            raise ValueError(f"Could not decode file {file_path} with any encoding")
+
+    def analyze_image_file(self, file_path: str) -> str:
+        """Extract text content from image file using vision model"""
+        prompt = """
+        Extract all text content from this image. Focus on:
+        1. Any written text, notes, or reports
+        2. Technical information
+        3. Names, dates, or identifiers
+
+        Return only the extracted text content without additional commentary.
+        If no text is visible, return "NO_TEXT_FOUND".
+        """
+        return self.vision_client.ask_vision([file_path], prompt)
+
+    def analyze_audio_file(self, file_path: str) -> str:
+        """Transcribe audio file to text"""
+        return self.audio_client.transcribe_audio(file_path)
+
+
+class ContentCategorizer:
+    """Utility class for categorizing content based on specific criteria"""
+
+    def __init__(self, llm_client: LLMClient):
+        self.llm_client = llm_client
+
+    def categorize_content(self, content: str, filename: str) -> str:
+        """
+        Categorize content into 'people', 'hardware', or 'other'
+        Returns: 'people', 'hardware', or 'other'
+        """
+        if not content or content.strip() == "NO_TEXT_FOUND":
+            return 'other'
+
+        system_prompt = """
+        You are an expert content categorizer for factory security reports. Analyze the given text and categorize it into exactly one of these categories:
+
+        **"people"** - ONLY for content about captured humans or clear traces of human presence:
+        - Explicit reports of captured/detained humans
+        - Clear evidence of unauthorized human presence (fingerprints, personal items found)
+        - Security incidents involving actual human intruders
+        - Direct human contact or sightings by security
+        - Must be about ACTUAL humans, not speculation about them
+
+        **"hardware"** - ONLY for content about physical hardware malfunctions or repairs:
+        - Equipment breakdowns, malfunctions, failures
+        - Physical component repairs (antennas, sensors, batteries, cables)
+        - Mechanical or electronic device maintenance
+        - Hardware replacement or fixes
+        - Do NOT include software updates, AI updates, or system software issues
+
+        **"other"** - Everything else:
+        - Routine patrols with no incidents
+        - Software updates, system updates, AI improvements
+        - False alarms from animals
+        - General operational reports
+        - Administrative content
+        - Speculation about human activity without concrete evidence
+        - Searching for people but finding nothing
+
+        CRITICAL RULES:
+        - Be extremely strict about "people" category - only use it for confirmed human captures or very clear human presence evidence
+        - Be extremely strict about "hardware" category - only physical equipment issues, not software
+        - When content mentions searching for people but finding nothing or abandoned areas, categorize as "other"
+        - When in any doubt, choose "other"
+
+        Analyze the content carefully and respond with exactly one word: "people", "hardware", or "other"
+        """
+
+        # Use gpt-4o for better accuracy
+        response = self.llm_client.answer_with_context(
+            question=f"Filename: {filename}\n\nContent to categorize:\n{content}",
+            context=system_prompt,
+            model="gpt-4o",
+            max_tokens=10
+        )
+
+        category = response.strip().lower()
+        if category not in ['people', 'hardware', 'other']:
+            return 'other'
+        return category
+
+    def categorize_with_reasoning(self, content: str, filename: str) -> tuple:
+        """
+        Categorize content and provide reasoning for debugging
+        Returns: (category, reasoning)
+        """
+        if not content or content.strip() == "NO_TEXT_FOUND":
+            return 'other', 'No content found'
+
+        system_prompt = """
+        You are an expert content categorizer for factory security reports. 
+
+        Categories:
+        1. "people" - ONLY confirmed captures or clear human presence evidence:
+           - Explicit reports of captured/detained humans
+           - Clear evidence of unauthorized human presence (fingerprints, personal items)
+           - Security incidents with actual human contact
+
+        2. "hardware" - ONLY physical equipment repairs/malfunctions (not software):
+           - Equipment breakdowns, component failures
+           - Physical repairs (antennas, sensors, batteries, cables)
+           - Hardware replacement or maintenance
+
+        3. "other" - Everything else:
+           - Routine patrols, software updates
+           - Searching for people but finding nothing
+           - False alarms, speculation
+
+        Be VERY strict - when in doubt, choose "other".
+
+        First provide your reasoning, then your final answer.
+        Format: REASONING: [your analysis] | CATEGORY: [people/hardware/other]
+        """
+
+        response = self.llm_client.answer_with_context(
+            question=f"Filename: {filename}\n\nContent:\n{content}",
+            context=system_prompt,
+            model="gpt-4o",
+            max_tokens=200
+        )
+
+        try:
+            parts = response.split('|')
+            reasoning = parts[0].replace('REASONING:', '').strip()
+            category = parts[1].replace('CATEGORY:', '').strip().lower()
+
+            if category not in ['people', 'hardware', 'other']:
+                category = 'other'
+
+            return category, reasoning
+        except:
+            return 'other', f"Failed to parse response: {response}"
 
 
 class Task(ABC):
