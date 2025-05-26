@@ -23,8 +23,6 @@ IMG_DIR    = CACHE_DIR/"img";       IMG_DIR.mkdir(exist_ok=True)
 AUD_DIR    = CACHE_DIR/"audio";     AUD_DIR.mkdir(exist_ok=True)
 
 
-# ---------------------------------------------------------------------------
-
 class ArxivTask(CentralaTask):
 
     def __init__(self, llm: LLMClient):
