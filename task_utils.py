@@ -3,8 +3,10 @@ Task Utilities - Common utilities for running tasks
 """
 import os
 import sys
-from typing import Type, Dict, Any
+import re
+from typing import Type, Dict, Any, Set
 from dotenv import load_dotenv
+from pathlib import Path
 from ai_agents_framework import Task, LLMClient
 
 
@@ -75,3 +77,12 @@ def verify_environment():
         print("Please set it with: export OPENAI_API_KEY='your-key-here'")
         sys.exit(1)
     return api_key
+
+
+def slurp(p: Path) -> str:
+    return p.read_text(encoding="utf-8", errors="ignore")
+
+
+def extract_persons(t: str) -> Set[str]:
+    return {m.group().strip() for m in
+            re.finditer(r"\b[A-ZŁŚŻŹĆ][a-ząćęłńóśżź]{2,}\s+[A-ZŁŚŻŹĆ][a-ząćęłńóśżź]{2,}\b", t)}
