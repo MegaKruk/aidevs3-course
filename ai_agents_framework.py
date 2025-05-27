@@ -16,12 +16,17 @@ import base64
 import zipfile
 import tempfile
 import shutil
+import uuid, datetime
+from qdrant_client import QdrantClient, models as qm
+from qdrant_client.http.models import Batch, Filter, FieldCondition, MatchValue
+import psycopg2, psycopg2.extras
 
 # Disable SSL warnings for the course
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
 
 Coordinate = Tuple[int, int]
+EMBED_MODEL = "text-embedding-3-large"
 
 
 class LLMClient:
@@ -137,6 +142,105 @@ class VisionClient:
             temperature=temperature,
         )
         return resp.choices[0].message.content.strip()
+
+
+class EmbeddingClient:
+    """Thin wrapper around OpenAI embedding endpoint."""
+    def __init__(self, api_key: Optional[str] = None):
+        if not api_key:
+            api_key = os.getenv("OPENAI_API_KEY")
+        self.client = openai.OpenAI(api_key=api_key)
+
+    def embed(self, text: str) -> List[float]:
+        resp = self.client.embeddings.create(
+            input=text,
+            model=EMBED_MODEL
+        )
+        return resp.data[0].embedding
+
+
+class QdrantVectorStore:
+    """Utility for inserting/searching embeddings in a (local) Qdrant instance."""
+    def __init__(self, collection: str = "weapons_reports"):
+        self.url = os.getenv("QDRANT_URL", "http://localhost:6333")
+        self.client = QdrantClient(url=self.url)
+        self.collection = collection
+        if not self.client.has_collection(collection):
+            self.client.create_collection(
+                collection_name=collection,
+                vectors_config=qm.VectorParams(size=3072, distance=qm.Distance.COSINE)
+            )
+
+    def upsert(self, points: List[tuple]):
+        ids, vecs, payloads = zip(*points)
+        self.client.upsert(
+            collection_name=self.collection,
+            points=Batch(ids=list(ids), vectors=list(vecs), payloads=list(payloads))
+        )
+
+    def search(self, vector: List[float], limit: int = 3,
+               filters: Dict[str, Any] | None = None):
+        flt = None
+        if filters:
+            conds = [FieldCondition(key=k, match=MatchValue(value=v)) for k, v in filters.items()]
+            flt = Filter(must=conds)
+        return self.client.search(
+            collection_name=self.collection,
+            query_vector=vector,
+            limit=limit,
+            query_filter=flt,
+            with_payload=True
+        )
+
+
+class PostgresStore:
+    """Minimal helper to keep chunk text / metadata."""
+    def __init__(self):
+        self.conn = psycopg2.connect(
+            host=os.getenv("PG_HOST", "localhost"),
+            port=os.getenv("PG_PORT", "5432"),
+            dbname=os.getenv("PG_DB", "vectors"),
+            user=os.getenv("PG_USER", "vector_user"),
+            password=os.getenv("PG_PASSWORD", "vector_pass")
+        )
+        self.conn.autocommit = True
+        self._ensure_table()
+
+    def _ensure_table(self):
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS weapons_chunks (
+                    uuid UUID PRIMARY KEY,
+                    file_name TEXT,
+                    chunk_idx INT,
+                    content TEXT,
+                    semantic_tags TEXT[],
+                    created_on TIMESTAMP,
+                    updated_on TIMESTAMP
+                );
+            """)
+
+    def upsert(self, rows: List[tuple]):
+        """
+        rows: (uuid, file_name, chunk_idx, content, tags)
+        """
+        with self.conn.cursor() as cur:
+            psycopg2.extras.execute_batch(cur, """
+                INSERT INTO weapons_chunks
+                (uuid, file_name, chunk_idx, content, semantic_tags,
+                 created_on, updated_on)
+                VALUES (%s,%s,%s,%s,%s,now(),now())
+                ON CONFLICT (uuid) DO UPDATE
+                SET content = EXCLUDED.content,
+                    semantic_tags = EXCLUDED.semantic_tags,
+                    updated_on = now();
+            """, rows)
+
+    def fetch_text(self, uid: str) -> str:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT content FROM weapons_chunks WHERE uuid=%s;", (uid,))
+            r = cur.fetchone()
+            return r[0] if r else ""
 
 
 class HttpClient:
