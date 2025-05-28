@@ -291,7 +291,8 @@ class CentralaDatabaseAPI:
     def __init__(self,
                  api_key: Optional[str] = None,
                  task_name: str = "database",
-                 url: str = "https://c3ntrala.ag3nts.org/apidb"):
+                 url: str = "https://c3ntrala.ag3nts.org/apidb",
+                 verbose: bool = False):
         if not api_key:
             api_key = os.getenv("CENTRALA_API_KEY")
         if not api_key:
@@ -300,6 +301,7 @@ class CentralaDatabaseAPI:
         self.api_key = api_key
         self.task    = task_name
         self.url     = url
+        self.verbose = verbose
         self.http    = HttpClient()
 
     def query(self, sql: str) -> Dict[str, Any]:
@@ -310,6 +312,10 @@ class CentralaDatabaseAPI:
         payload = {"task": self.task, "apikey": self.api_key, "query": sql}
         print(f"\n--- SQL ---\n{sql}\n------------")
         resp = self.http.submit_json(self.url, payload)
+
+        if self.verbose:
+            print("payload:", payload)
+            print("response:", json.dumps(resp, indent=2, ensure_ascii=False))
 
         err = (resp.get("error") or "").strip().upper()
         if err and err not in {"OK", "SUCCESS"}:

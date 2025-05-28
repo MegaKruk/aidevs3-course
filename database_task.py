@@ -20,7 +20,7 @@ load_dotenv()
 
 # --------------------------------------------------------------------------- konfiguracja
 API_KEY      = os.getenv("CENTRALA_API_KEY")
-DB_API       = CentralaDatabaseAPI(api_key=API_KEY)
+DB_API       = CentralaDatabaseAPI(api_key=API_KEY, verbose=True)
 LLM          = LLMClient()
 
 REPORT_URL   = "https://c3ntrala.ag3nts.org/report"
