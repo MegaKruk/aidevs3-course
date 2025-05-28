@@ -282,6 +282,41 @@ class HttpClient:
         return response.json()
 
 
+class CentralaDatabaseAPI:
+    """
+    Minimalny klient do endpointu /apidb.
+    Umożliwia wykonywanie zapytań SQL w ramach zadań Centrali.
+    """
+
+    def __init__(self,
+                 api_key: Optional[str] = None,
+                 task_name: str = "database",
+                 url: str = "https://c3ntrala.ag3nts.org/apidb"):
+        if not api_key:
+            api_key = os.getenv("CENTRALA_API_KEY")
+        if not api_key:
+            raise ValueError("CENTRALA_API_KEY environment variable not set")
+
+        self.api_key = api_key
+        self.task    = task_name
+        self.url     = url
+        self.http    = HttpClient()
+
+    def query(self, sql: str) -> Dict[str, Any]:
+        """
+        Wysyła SQL do /apidb i zwraca słownik z kluczem 'reply' (lista wierszy)
+        albo rzuca wyjątek gdy API zwraca błąd.
+        """
+        payload = {"task": self.task, "apikey": self.api_key, "query": sql}
+        print(f"\n--- SQL ---\n{sql}\n------------")
+        resp = self.http.submit_json(self.url, payload)
+
+        err = (resp.get("error") or "").strip().upper()
+        if err and err not in {"OK", "SUCCESS"}:
+            raise RuntimeError(f"DB error: {resp['error']}")
+        return resp["reply"]
+
+
 class ExpressionEvaluator:
     """Utility for safely evaluating simple arithmetic expressions ( + – * / and parentheses )."""
 
