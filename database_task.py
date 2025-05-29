@@ -18,7 +18,7 @@ from ai_agents_framework import (
 
 load_dotenv()
 
-# --------------------------------------------------------------------------- konfiguracja
+# konfiguracja ---------------------------------------------------------------------------
 API_KEY      = os.getenv("CENTRALA_API_KEY")
 DB_API       = CentralaDatabaseAPI(api_key=API_KEY, verbose=True)
 LLM          = LLMClient()
@@ -26,7 +26,7 @@ LLM          = LLMClient()
 REPORT_URL   = "https://c3ntrala.ag3nts.org/report"
 TASK_NAME    = "database"
 
-# --------------------------------------------------------------------------- helpers
+# helpers --------------------------------------------------------------------------------
 def llm_sql(schema: str, question: str) -> str:
     """Generuje surowy (bez Markdown) SQL przy użyciu GPT-4o."""
     system = textwrap.dedent("""
@@ -49,7 +49,7 @@ def submit_answer(ids: List[int]) -> Dict[str, Any]:
     print(json.dumps(payload, indent=2))
     return HttpClient().submit_json(REPORT_URL, payload)
 
-# --------------------------------------------------------------------------- main
+# main ------------------------------------------------------------------------------------
 def main() -> None:
     # 1) zbadanie schematów
     tables = [row["Tables_in_banan"] for row in DB_API.query("SHOW TABLES;")]
@@ -85,6 +85,6 @@ def main() -> None:
     if flag:
         print("FLAGA:", flag)
 
-# --------------------------------------------------------------------------- entry
+# entry ----------------------------------------------------------------------------------
 if __name__ == "__main__":
     main()

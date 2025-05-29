@@ -16,7 +16,9 @@ import base64
 import zipfile
 import tempfile
 import shutil
-import uuid, datetime
+import uuid
+import datetime
+import unicodedata
 from qdrant_client import QdrantClient, models as qm
 from qdrant_client.http.models import Batch, Filter, FieldCondition, MatchValue
 import psycopg2, psycopg2.extras
@@ -1249,3 +1251,91 @@ class CentralaTask(Task):
 
         response_data = self.http_client.submit_json(report_url, payload)
         return response_data
+
+
+class PeoplePlacesAPI:
+    """
+    Thin wrapper around /people   and /places.
+    • POSTs JSON {apikey, query}
+    • returns a *list* (normalised, upper-case; [] when 404/empty)
+    • keeps simple in-memory cache
+    """
+    def __init__(self, api_key: str,
+                 base: str = "https://c3ntrala.ag3nts.org") -> None:
+        self.key   = api_key
+        self.base  = base.rstrip("/")
+        self.http  = HttpClient()
+        self.cache_people: dict[str, list[str]] = {}
+        self.cache_places: dict[str, list[str]] = {}
+
+    # ---------- public ------------------------------------------------------
+    def query_people(self, person: str) -> list[str]:
+        person = self.normalise_name(person)
+        if person in self.cache_people:
+            return self.cache_people[person]
+
+        out = self._safe_call(endpoint="people", query=person)
+        self.cache_people[person] = out
+        print(f"/people  {person:<12} -> {out}")
+        return out
+
+    def query_places(self, city: str) -> list[str]:
+        city = self.normalise_city(city)
+        if city in self.cache_places:
+            return self.cache_places[city]
+
+        out = self._safe_call(endpoint="places", query=city)
+        self.cache_places[city] = out
+        print(f"/places  {city:<12} -> {out}")
+        return out
+
+    # ---------- helpers -----------------------------------------------------
+    def _safe_call(self, endpoint: str, query: str) -> list[str]:
+        data = {"apikey": self.key, "query": query}
+        url  = f"{self.base}/{endpoint}"
+        try:
+            resp = self.http.submit_json(url, data)
+            return self._parse(resp.get("message", ""))
+        except requests.exceptions.HTTPError as exc:
+            code = exc.response.status_code if exc.response else None
+            if code in (400, 404):
+                # bad query or no data → treat as empty result
+                print(f"{url} {code} – no records for {query}")
+                return []
+            # something else – keep going but log it
+            print(f"{url} {code or '?'} – unexpected error, treating as empty")
+            return []
+        except Exception as exc:
+            # absolutely anything else -> treat as empty but tell the user
+            print(f"{url} – exception {exc!r} (ignored, returning empty)")
+            return []
+
+    def _parse(self, msg: str) -> list[str]:
+        """
+        Split the API message by commas / whitespace,
+        normalise each token (strip accents, upper-case),
+        keep only plausible words (A-Z, length ≥ 3).
+        """
+        raw = re.split(r"[,\s]+", msg.strip())
+        out: list[str] = []
+        for tok in raw:
+            tok_n = self._norm(tok)
+            if len(tok_n) >= 3 and tok_n.isalpha():
+                out.append(tok_n)
+        return out
+
+    def _norm(self, token: str) -> str:
+        return self.strip_accents(token).upper().strip()
+
+    def strip_accents(self, txt: str) -> str:
+        return "".join(
+            c for c in unicodedata.normalize("NFD", txt)
+            if unicodedata.category(c) != "Mn"
+        )
+
+    def normalise_name(self, name: str) -> str:
+        """Mianownik, bez polskich znaków, wielkie litery."""
+        return self._norm(name.split()[0])
+
+    def normalise_city(self, city: str) -> str:
+        return self._norm(city)
