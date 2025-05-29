@@ -1,172 +1,163 @@
 """
 S03E04  –  Zadanie „loop”  (Barbara Zawadzka)
 
-Kroki:
-1.  pobierz notatkę barbara.txt i wyciągnij imiona + miasta
-2.  breadth-first search przez API /people oraz /places
-3.  gdy w odpowiedzi z /places pojawi się BARBARA w nowym mieście ⇒ success
-4.  dodatkowo: znajdź
-      • współpracownika Aleksandra i Barbary
-      • osobę, z którą widział się Rafał
+1. Pobierz notatkę barbara.txt, wyciągnij imiona + miasta.
+2. BFS po /people & /places aż przejdziemy CAŁĄ sieć, logując surowe
+   odpowiedzi (może kryć się tam sekretna flaga „upadnij nisko”).
+3. Główna odpowiedź: miasto, w którym *aktualnie* (nowe) widziano BARBARĘ.
+4. Dodatkowo: współpracownik Aleksandra & Barbary oraz osoba, z którą
+   widział się Rafał.
 """
 
 from __future__ import annotations
-import os, re, json, collections
-from typing import Set, Dict
+import os, re, json, collections, sys
+from typing import Set, Dict, Tuple
+from pathlib import Path
 from dotenv import load_dotenv
 from ai_agents_framework import (
     LLMClient, HttpClient, FlagDetector, PeoplePlacesAPI
 )
 
 load_dotenv()
-API_KEY    = os.getenv("CENTRALA_API_KEY")
-BASE_URL   = "https://c3ntrala.ag3nts.org"
-NOTE_URL   = f"{BASE_URL}/dane/barbara.txt"
-REPORT_URL = f"{BASE_URL}/report"
-TASK_NAME  = "loop"
+API_KEY     = os.getenv("CENTRALA_API_KEY")
+BASE_URL    = "https://c3ntrala.ag3nts.org"
+NOTE_URL    = f"{BASE_URL}/dane/barbara.txt"
+REPORT_URL  = f"{BASE_URL}/report"
+TASK_NAME   = "loop"
 
-http = HttpClient()
-llm = LLMClient()
-pp_api = PeoplePlacesAPI(API_KEY)
+RAW_DIR = Path("_secret_payloads")     # ensure visible also here
 
-# -----------------------------------------------------------------------------
+http  = HttpClient()
+llm   = LLMClient()
+ppapi = PeoplePlacesAPI(API_KEY)
+
+# ──────────────────────────────────────────────────────────────────────────────
 def download_note() -> str:
-    print("Pobieram notatkę:", NOTE_URL)
+    print("⏬  Fetching note:", NOTE_URL)
     txt = http.get(NOTE_URL).text
-    print(f"Pobrano {len(txt)} znaków:")
-    print(txt)
+    print(f"… {len(txt)} chars downloaded\n")
     return txt
 
-NAME_RE = re.compile(r"\b[A-ZŁŚŻŹĆ][a-ząćęłńóśżź]+(?:\s+[A-Z][a-z]+)?\b")
-CITY_RE = re.compile(r"\b[A-ZŻŹŁŚĆÓ]{3,}\b")   # uproszczone – w notatce miasta są wielkimi?
-
-def extract_names_cities(note: str) -> tuple[set[str], set[str]]:
+# ──────────────────────────────────────────────────────────────────────────────
+def extract_names_cities(note: str) -> Tuple[set[str], set[str]]:
     """
-    Use GPT-4o to pull clean PEOPLE / CITIES lists out of *note*.
-    Accepts both raw JSON and ```json … ``` fenced blocks.
+    Ask GPT-4o to produce clean JSON with PEOPLE / CITIES lists.
     """
-    sys_prompt = (
-        "You are an information-extraction assistant. "
-        "Return valid JSON with two arrays: PEOPLE and CITIES. "
-        "Rules:\n"
-        "- Only first names (no surnames) in nominative case go to PEOPLE.\n"
-        "- Only Polish city names WITHOUT diacritics go to CITIES.\n"
-        "- No duplicates. No commentary."
+    system = (
+        "You are an information-extraction assistant.\n"
+        "Return *valid JSON* with exactly two arrays: PEOPLE and CITIES.\n"
+        "- PEOPLE → ONLY Polish first names, nominative, no diacritics\n"
+        "- CITIES → ONLY Polish city names, no diacritics\n"
+        "- No duplicates, no commentary"
     )
-
     resp = llm.answer_with_context(
-        question=note,
-        context=sys_prompt,
-        model="gpt-4o",
-        max_tokens=400
+        question=note, context=system, model="gpt-4o", max_tokens=400
     ).strip()
-
-    # strip optional ```json … ``` or ``` … ``` fences
     resp = re.sub(r"^```(?:json)?\s*|\s*```$", "", resp, flags=re.I | re.S).strip()
 
     try:
         data = json.loads(resp)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"LLM did not return valid JSON.\nReply was:\n{resp}") from e
+    except Exception as e:
+        print("LLM reply was not valid JSON:\n", resp, file=sys.stderr)
+        raise
 
-    people = {pp_api.normalise_name(n) for n in data.get("PEOPLE", [])}
-    cities = {pp_api.normalise_city(c) for c in data.get("CITIES", [])}
+    people = {ppapi.normalise_name(n) for n in data.get("PEOPLE", [])}
+    cities = {ppapi.normalise_city(c) for c in data.get("CITIES", [])}
     return people, cities
 
-# -----------------------------------------------------------------------------
-def bfs(names0: Set[str], cities0: Set[str]):
-    people_q  = collections.deque(sorted(n for n in names0 if n))
-    cities_q  = collections.deque(sorted(c for c in cities0 if c))
+# ──────────────────────────────────────────────────────────────────────────────
+def crawl(names0: Set[str], cities0: Set[str]) -> Tuple[str, Dict[str, Set[str]], Dict[str, Set[str]]]:
+    """
+    Full BFS – *no early exit*; returns first new-city-with-Barbara, plus maps.
+    """
+    q_people = collections.deque(sorted(names0))
+    q_cities = collections.deque(sorted(cities0))
+    seen_p, seen_c = set(q_people), set(q_cities)
 
-    seen_people: Set[str] = set(people_q)
-    seen_cities: Set[str] = set(cities_q)
-
-    # mapping helpers
     person_cities: Dict[str, Set[str]] = collections.defaultdict(set)
-    city_people: Dict[str, Set[str]] = collections.defaultdict(set)
+    city_people:   Dict[str, Set[str]] = collections.defaultdict(set)
 
-    while people_q or cities_q:
-        if people_q:
-            name = people_q.popleft()
-            places = pp_api.query_people(name)
-            for city in places:
-                if city not in seen_cities:
-                    seen_cities.add(city)
-                    cities_q.append(city)
-                person_cities[name].add(city)
-                city_people[city].add(name)
+    first_city_with_barbara = None
 
-        if cities_q:
-            city = cities_q.popleft()
-            persons = pp_api.query_places(city)
-            # --- SUKCES? ---
-            if "BARBARA" in persons and city not in cities0:
-                print(f"\n===> BARBARA widziana w NOWYM mieście: {city}")
-                return city, person_cities, city_people
-            for p in persons:
-                if p not in seen_people:
-                    seen_people.add(p)
-                    people_q.append(p)
+    while q_people or q_cities:
+        # ----- expand by person -> cities -----
+        if q_people:
+            p = q_people.popleft()
+            for city in ppapi.query_people(p):
                 person_cities[p].add(city)
                 city_people[city].add(p)
+                if city not in seen_c:
+                    seen_c.add(city)
+                    q_cities.append(city)
 
-    raise RuntimeError("Nie znaleziono Barbary w nowym mieście.")
+        # ----- expand by city -> persons ------
+        if q_cities:
+            c = q_cities.popleft()
+            for person in ppapi.query_places(c):
+                city_people[c].add(person)
+                person_cities[person].add(c)
+                if person not in seen_p:
+                    seen_p.add(person)
+                    q_people.append(person)
 
-# -----------------------------------------------------------------------------
-def extra_answers(person_cities: Dict[str, Set[str]],
-                  city_people: Dict[str, Set[str]]) -> tuple[str|None, str|None]:
-    # współpracownik Aleksandra i Barbary → ktoś obecny w KAŻDYM mieście,
-    # w którym występuje zarówno Aleksander, jak i Barbara
-    aleks = "ALEKSANDER"
-    barb  = "BARBARA"
-    common = None
-    if aleks in person_cities and barb in person_cities:
-        shared_cities = person_cities[aleks] & person_cities[barb]
-        cand: Dict[str, int] = collections.Counter()
-        for c in shared_cities:
-            for p in city_people[c]:
-                if p not in {aleks, barb}:
-                    cand[p] += 1
-        if cand:
-            common = max(cand, key=cand.get)
+            if "BARBARA" in city_people[c] and c not in cities0 and not first_city_with_barbara:
+                first_city_with_barbara = c
+                print(f"\nFirst new city with BARBARA: {c}")
 
-    # z kim widział się Rafał?  – ktokolwiek współwystępuje z nim w jakimś mieście
-    rafael = "RAFAL"
+    if not first_city_with_barbara:
+        raise RuntimeError("Barbara not spotted in a new city.")
+    return first_city_with_barbara, person_cities, city_people
+
+# ──────────────────────────────────────────────────────────────────────────────
+def extra_answers(pc: Dict[str, Set[str]], cp: Dict[str, Set[str]]) -> Tuple[str|None, str|None]:
+    # wspólnik
+    a, b = "ALEKSANDER", "BARBARA"
+    collaborator = None
+    common_cities = pc[a] & pc[b] if a in pc and b in pc else set()
+    if common_cities:
+        counter = collections.Counter(
+            x for city in common_cities for x in cp[city] if x not in {a, b}
+        )
+        if counter:
+            collaborator = counter.most_common(1)[0][0]
+
+    # znajomy Rafała
     meet = None
-    if rafael in person_cities:
-        for c in person_cities[rafael]:
-            others = city_people[c] - {rafael}
+    if "RAFAL" in pc:
+        for city in pc["RAFAL"]:
+            others = cp[city] - {"RAFAL"}
             if others:
-                meet = next(iter(sorted(others)))
+                meet = sorted(others)[0]
                 break
-    return common, meet
+    return collaborator, meet
 
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 def submit(city: str):
     payload = {"task": TASK_NAME, "apikey": API_KEY, "answer": city}
-    print("\nWysyłka do /report …")
+    print("\nSubmitting:")
     print(json.dumps(payload, indent=2))
     resp = http.submit_json(REPORT_URL, payload)
-    print("Odpowiedź Centrali:", resp)
-    flag = FlagDetector.find_flag(json.dumps(resp))
-    if flag:
-        print("FLAGA:", flag)
+    print("Central reply:", resp)
+    FlagDetector.find_flag(json.dumps(resp))
 
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 def main():
     note = download_note()
     names0, cities0 = extract_names_cities(note)
-    print("Imiona z notatki:", names0)
-    print("Miasta z notatki:", cities0)
 
-    city, person_cities, city_people = bfs(names0, cities0)
-    submit(city)
+    print("People in note :", names0)
+    print("Cities in note :", cities0)
 
-    wsp, raf = extra_answers(person_cities, city_people)
-    print("\n--- Dodatkowe odpowiedzi ---")
-    print("Współpracownik Aleksandra i Barbary:", wsp or "nie znaleziono")
-    print("Z kim widział się Rafał:", raf or "nie znaleziono")
+    new_city, pc, cp = crawl(names0, cities0)
+    submit(new_city)
 
-# -----------------------------------------------------------------------------
+    collab, meet = extra_answers(pc, cp)
+    print("\n--- Extra answers ---")
+    print("Współpracownik Aleksandra i Barbary:", collab or "nie znaleziono")
+    print("Z kim widział się Rafał:", meet or "nie znaleziono")
+
+    print("\nCheck _secret_payloads/ for hidden artefacts!")
+
+# ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     main()

@@ -18,7 +18,12 @@ import tempfile
 import shutil
 import uuid
 import datetime
+import zlib
+import pathlib
+import mimetypes
 import unicodedata
+import binascii
+import filetype
 from qdrant_client import QdrantClient, models as qm
 from qdrant_client.http.models import Batch, Filter, FieldCondition, MatchValue
 import psycopg2, psycopg2.extras
@@ -29,6 +34,8 @@ load_dotenv()
 
 Coordinate = Tuple[int, int]
 EMBED_MODEL = "text-embedding-3-large"
+RAW_DIR = pathlib.Path("_secret_payloads")
+RAW_DIR.mkdir(exist_ok=True)
 
 
 class LLMClient:
@@ -1255,26 +1262,33 @@ class CentralaTask(Task):
 
 class PeoplePlacesAPI:
     """
-    Thin wrapper around /people   and /places.
-    • POSTs JSON {apikey, query}
-    • returns a *list* (normalised, upper-case; [] when 404/empty)
-    • keeps simple in-memory cache
+    Thin wrapper around /people and /places endpoints.
+
+    • POSTs JSON  {"apikey": ..., "query": ...}
+    • Returns a *list* of upper-cased tokens (cities or people).
+    • Silently converts 400/404 into an empty list.
+    • Dumps any suspiciously long, non-comma payload into _secret_payloads/.
     """
-    def __init__(self, api_key: str,
-                 base: str = "https://c3ntrala.ag3nts.org") -> None:
+
+    def __init__(
+        self,
+        api_key: str,
+        base: str = "https://c3ntrala.ag3nts.org"
+    ) -> None:
         self.key   = api_key
         self.base  = base.rstrip("/")
         self.http  = HttpClient()
         self.cache_people: dict[str, list[str]] = {}
         self.cache_places: dict[str, list[str]] = {}
 
-    # ---------- public ------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────────────
+    # Public API
+    # ──────────────────────────────────────────────────────────────────────────────
     def query_people(self, person: str) -> list[str]:
         person = self.normalise_name(person)
         if person in self.cache_people:
             return self.cache_people[person]
-
-        out = self._safe_call(endpoint="people", query=person)
+        out = self._safe_call("people", person)
         self.cache_people[person] = out
         print(f"/people  {person:<12} -> {out}")
         return out
@@ -1283,58 +1297,115 @@ class PeoplePlacesAPI:
         city = self.normalise_city(city)
         if city in self.cache_places:
             return self.cache_places[city]
-
-        out = self._safe_call(endpoint="places", query=city)
+        out = self._safe_call("places", city)
         self.cache_places[city] = out
         print(f"/places  {city:<12} -> {out}")
         return out
 
-    # ---------- helpers -----------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────────────
+    # Internals
+    # ──────────────────────────────────────────────────────────────────────────────
     def _safe_call(self, endpoint: str, query: str) -> list[str]:
         data = {"apikey": self.key, "query": query}
-        url  = f"{self.base}/{endpoint}"
+        url = f"{self.base}/{endpoint}"
         try:
             resp = self.http.submit_json(url, data)
-            return self._parse(resp.get("message", ""))
+            msg = resp.get("message", "")
+
+            # --- dump every non-canonical payload ----------------------------
+            if not re.fullmatch(r"[A-Z ,]+", msg) or len(msg) > 200:
+                self._dump_raw(msg.encode(), endpoint, query)
+
+            return self._parse(msg)
+
         except requests.exceptions.HTTPError as exc:
             code = exc.response.status_code if exc.response else None
             if code in (400, 404):
-                # bad query or no data → treat as empty result
                 print(f"{url} {code} – no records for {query}")
                 return []
-            # something else – keep going but log it
             print(f"{url} {code or '?'} – unexpected error, treating as empty")
             return []
-        except Exception as exc:
-            # absolutely anything else -> treat as empty but tell the user
-            print(f"{url} – exception {exc!r} (ignored, returning empty)")
-            return []
 
+    def _dump_raw(self, blob: bytes, endpoint: str, query: str) -> None:
+        RAW_DIR.mkdir(exist_ok=True)
+        txt_path = RAW_DIR / f"{endpoint}_{query}.txt"
+        bin_path = RAW_DIR / f"{endpoint}_{query}.bin"
+
+        # 1. always keep original
+        txt_path.write_bytes(blob)
+        print(f"[saved] {txt_path}")
+
+        # 2. try base-64
+        try:
+            decoded = base64.b64decode(blob, validate=True)
+        except binascii.Error:
+            return  # not base64 – we’re done
+
+        # 3. zlib-inflate if possible
+        try:
+            decoded = zlib.decompress(decoded)
+        except zlib.error:
+            pass
+
+        # 4. guess file type, save with extension
+        kind = filetype.guess(decoded)
+        suffix = kind.extension if kind else "bin"
+        final_path = RAW_DIR / f"{endpoint}_{query}.{suffix}"
+        final_path.write_bytes(decoded)
+        print(f"[saved] {final_path}")
+
+    # .............................................................................
+    def _maybe_dump(self, msg: str, endpoint: str, query: str) -> None:
+        """
+        Save suspicious payloads (long base-64 or multiline ascii) to disk.
+        """
+        RAW_DIR.mkdir(exist_ok=True)
+
+        # 1) multiline ASCII art?
+        if msg.count("\n") >= 3:
+            (RAW_DIR / f"{endpoint}_{query}.txt").write_text(msg, "utf-8")
+            print(f"[+] dumped multiline text -> {endpoint}_{query}.txt")
+            return
+
+        # 2) likely base-64?
+        if len(msg) > 100 and re.fullmatch(r"[A-Za-z0-9+/=]+", msg):
+            try:
+                raw = base64.b64decode(msg, validate=True)
+                try:
+                    raw = zlib.decompress(raw)
+                except zlib.error:
+                    pass  # not compressed – OK
+                # detect mime → extension
+                header = raw[:20]
+                ext = ".bin"
+                if header.startswith(b"\x89PNG"):
+                    ext = ".png"
+                elif header.startswith(b"\xff\xd8"):
+                    ext = ".jpg"
+                fn = RAW_DIR / f"{endpoint}_{query}{ext}"
+                fn.write_bytes(raw)
+                print(f"[+] dumped binary payload -> {fn}")
+            except Exception as e:
+                print(f"[?] suspected base64 but decode failed: {e}")
+
+    # .............................................................................
     def _parse(self, msg: str) -> list[str]:
-        """
-        Split the API message by commas / whitespace,
-        normalise each token (strip accents, upper-case),
-        keep only plausible words (A-Z, length ≥ 3).
-        """
-        raw = re.split(r"[,\s]+", msg.strip())
-        out: list[str] = []
-        for tok in raw:
-            tok_n = self._norm(tok)
-            if len(tok_n) >= 3 and tok_n.isalpha():
-                out.append(tok_n)
-        return out
+        tokens = re.split(r"[,\s]+", msg.strip())
+        return [self._norm(t) for t in tokens if len(t) >= 3 and t.isalpha()]
 
+    # .............................................................................
     def _norm(self, token: str) -> str:
         return self.strip_accents(token).upper().strip()
 
-    def strip_accents(self, txt: str) -> str:
+    @staticmethod
+    def strip_accents(txt: str) -> str:
         return "".join(
             c for c in unicodedata.normalize("NFD", txt)
             if unicodedata.category(c) != "Mn"
         )
 
+    # exposed normalisers
     def normalise_name(self, name: str) -> str:
-        """Mianownik, bez polskich znaków, wielkie litery."""
         return self._norm(name.split()[0])
 
     def normalise_city(self, city: str) -> str:
