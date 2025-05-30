@@ -26,6 +26,7 @@ import binascii
 import filetype
 from qdrant_client import QdrantClient, models as qm
 from qdrant_client.http.models import Batch, Filter, FieldCondition, MatchValue
+from neo4j import GraphDatabase, Driver
 import psycopg2, psycopg2.extras
 
 # Disable SSL warnings for the course
@@ -124,8 +125,8 @@ class VisionClient:
         temperature: float = 0.0,
     ) -> str:
         """
-        • *image_paths* – list of local image files (jpg/png/webp…)
-        • *prompt*      – system+user instruction to accompany images
+        - *image_paths* – list of local image files (jpg/png/webp…)
+        - *prompt*      – system+user instruction to accompany images
 
         Returns model’s textual reply.
         """
@@ -523,8 +524,8 @@ class GridUtils:
 class PathFinder:
     """
     A*-based pathfinder that works on the tiny 2-D grids we get from BanAN
-      • grid  – string created by GridUtils.normalise_ascii_grid
-      • returns list of directions:  ["UP", "UP", "RIGHT", …]
+      - grid  – string created by GridUtils.normalise_ascii_grid
+      - returns list of directions:  ["UP", "UP", "RIGHT", …]
     """
 
     DIRS: dict[Coordinate, str] = {
@@ -1264,10 +1265,10 @@ class PeoplePlacesAPI:
     """
     Thin wrapper around /people and /places endpoints.
 
-    • POSTs JSON  {"apikey": ..., "query": ...}
-    • Returns a *list* of upper-cased tokens (cities or people).
-    • Silently converts 400/404 into an empty list.
-    • Dumps any suspiciously long, non-comma payload into _secret_payloads/.
+    - POSTs JSON  {"apikey": ..., "query": ...}
+    - Returns a *list* of upper-cased tokens (cities or people).
+    - Silently converts 400/404 into an empty list.
+    - Dumps any suspiciously long, non-comma payload into _secret_payloads/.
     """
 
     def __init__(
@@ -1281,9 +1282,6 @@ class PeoplePlacesAPI:
         self.cache_people: dict[str, list[str]] = {}
         self.cache_places: dict[str, list[str]] = {}
 
-    # ──────────────────────────────────────────────────────────────────────────────
-    # Public API
-    # ──────────────────────────────────────────────────────────────────────────────
     def query_people(self, person: str) -> list[str]:
         person = self.normalise_name(person)
         if person in self.cache_people:
@@ -1302,9 +1300,6 @@ class PeoplePlacesAPI:
         print(f"/places  {city:<12} -> {out}")
         return out
 
-    # ──────────────────────────────────────────────────────────────────────────────
-    # Internals
-    # ──────────────────────────────────────────────────────────────────────────────
     def _safe_call(self, endpoint: str, query: str) -> list[str]:
         data = {"apikey": self.key, "query": query}
         url = f"{self.base}/{endpoint}"
@@ -1354,7 +1349,6 @@ class PeoplePlacesAPI:
         final_path.write_bytes(decoded)
         print(f"[saved] {final_path}")
 
-    # .............................................................................
     def _maybe_dump(self, msg: str, endpoint: str, query: str) -> None:
         """
         Save suspicious payloads (long base-64 or multiline ascii) to disk.
@@ -1388,12 +1382,10 @@ class PeoplePlacesAPI:
             except Exception as e:
                 print(f"[?] suspected base64 but decode failed: {e}")
 
-    # .............................................................................
     def _parse(self, msg: str) -> list[str]:
         tokens = re.split(r"[,\s]+", msg.strip())
         return [self._norm(t) for t in tokens if len(t) >= 3 and t.isalpha()]
 
-    # .............................................................................
     def _norm(self, token: str) -> str:
         return self.strip_accents(token).upper().strip()
 
@@ -1410,3 +1402,57 @@ class PeoplePlacesAPI:
 
     def normalise_city(self, city: str) -> str:
         return self._norm(city)
+
+
+class Neo4jGraph:
+    """
+    Tiny convenience wrapper around a local Neo4j instance
+    (default bolt://localhost:7687, usr/pwd = neo4j / neo4j).
+
+    Functions implemented only for what we need in S03E05:
+        - wipe()                              – clear all data
+        - add_user(uid:int, name:str)         – create (User {userId, name})
+        - add_connection(a:int, b:int)        – (a)-[:KNOWS]->(b)
+        - shortest_names(src:str, dst:str)    – shortest path as list[str]
+    """
+
+    def __init__(self,
+                 uri: str = "bolt://localhost:7687",
+                 user: str = "neo4j",
+                 password: str = "neo4j") -> None:
+        self._driver: Driver = GraphDatabase.driver(uri, auth=(user, password))
+
+    def close(self) -> None:
+        self._driver.close()
+
+    def wipe(self) -> None:
+        with self._driver.session() as ses:
+            ses.run("MATCH (n) DETACH DELETE n")
+
+    def add_user(self, uid: int, name: str) -> None:
+        cypher = """
+        MERGE (:User {userId:$uid, name:$name})
+        """
+        with self._driver.session() as ses:
+            ses.run(cypher, uid=uid, name=name)
+
+    def add_connection(self, uid1: int, uid2: int) -> None:
+        cypher = """
+        MATCH (a:User {userId:$u1})
+        MATCH (b:User {userId:$u2})
+        MERGE (a)-[:KNOWS]->(b)
+        """
+        with self._driver.session() as ses:
+            ses.run(cypher, u1=uid1, u2=uid2)
+
+    def shortest_names(self, src_name: str, dst_name: str) -> list[str]:
+        cypher = """
+        MATCH (src:User {name:$src}), (dst:User {name:$dst}),
+              p = shortestPath( (src)-[:KNOWS*]-(dst) )
+        RETURN [x IN nodes(p) | x.name] AS path
+        """
+        with self._driver.session() as ses:
+            rec = ses.run(cypher, src=src_name, dst=dst_name).single()
+            if not rec:
+                raise RuntimeError("No path found")
+            return rec["path"]

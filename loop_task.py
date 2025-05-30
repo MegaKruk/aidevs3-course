@@ -33,9 +33,10 @@ ppapi = PeoplePlacesAPI(API_KEY)
 
 # ──────────────────────────────────────────────────────────────────────────────
 def download_note() -> str:
-    print("⏬  Fetching note:", NOTE_URL)
+    print("Fetching note:", NOTE_URL)
     txt = http.get(NOTE_URL).text
-    print(f"… {len(txt)} chars downloaded\n")
+    print(f"...{len(txt)} chars downloaded:")
+    print(txt)
     return txt
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -46,8 +47,8 @@ def extract_names_cities(note: str) -> Tuple[set[str], set[str]]:
     system = (
         "You are an information-extraction assistant.\n"
         "Return *valid JSON* with exactly two arrays: PEOPLE and CITIES.\n"
-        "- PEOPLE → ONLY Polish first names, nominative, no diacritics\n"
-        "- CITIES → ONLY Polish city names, no diacritics\n"
+        "- PEOPLE -> ONLY Polish first names, nominative, no diacritics\n"
+        "- CITIES -> ONLY Polish city names, no diacritics\n"
         "- No duplicates, no commentary"
     )
     resp = llm.answer_with_context(
