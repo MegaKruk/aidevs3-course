@@ -288,6 +288,7 @@ class HttpClient:
             default_headers.update(headers)
 
         response = self.session.post(url, json=data, headers=default_headers)
+        print(f"response content: {response.content}")
         response.raise_for_status()
         return response.json()
 
