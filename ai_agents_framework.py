@@ -1404,6 +1404,42 @@ class PeoplePlacesAPI:
         return self._norm(city)
 
 
+class PhotoAPIClient:
+    """
+    Very small wrapper over Centrala “photos” conversation endpoint.
+
+    Usage:
+        bot = PhotoAPIClient(apikey)
+        reply = bot.send("START")                 # begin conversation
+        reply = bot.send("REPAIR IMG_001.PNG")    # any further command
+    """
+
+    def __init__(self,
+                 api_key: str | None = None,
+                 url: str = "https://c3ntrala.ag3nts.org/report",
+                 timeout: int = 30):
+        if not api_key:
+            api_key = os.getenv("CENTRALA_API_KEY")
+        if not api_key:
+            raise ValueError("CENTRALA_API_KEY environment variable not set")
+
+        self.api_key = api_key
+        self.url     = url
+        self.http    = HttpClient()
+        self.timeout = timeout
+
+    def send(self, cmd: str) -> dict[str, str | int]:
+        """
+        POST {task:'photos', apikey:..., answer:cmd}  →  dict(code:int, message:str)
+        """
+        payload = {"task": "photos", "apikey": self.api_key, "answer": cmd}
+        resp = self.http.submit_json(self.url, payload,
+                                     headers={"Content-Type": "application/json"})
+        if "message" not in resp:
+            raise RuntimeError(f"Malformed response: {resp}")
+        return resp
+
+
 class Neo4jGraph:
     """
     Tiny convenience wrapper around a local Neo4j instance
