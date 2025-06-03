@@ -1,26 +1,16 @@
 """
-research_task.py
+research_task_llm.py
 
-Centrala “research” – trust the genuine lab readings.
+Idea
+----
+The “correct” readings form a closed set: any line that appears in
+`correct.txt` is genuine, anything else is forged.
+We feed the full list of genuine readings to GPT-4o in the system prompt
+and simply ask it to answer “1” (genuine) or “0” (forged) for every line
+from `verify.txt`.
 
-Insight
--------
-The three source files show a hidden, but very simple rule:
-
-* **correct.txt**   – every line appears verbatim in the official reference set
-* **incorect.txt**  – every line appears verbatim in the forged set
-* **verify.txt**    – lines copied *exactly* from one of the two lists
-
-Therefore, to decide which IDs are trustworthy we only need to:
-
-1. Load `correct.txt` and put every line into a Python **set**.
-2. For each row in `verify.txt`
-   • split off its 2-digit ID
-   • keep the payload after the `=` sign
-   • accept the ID if that payload is **in the correct-set**.
-3. Submit the list of accepted IDs.
-
-No LLM calls, no heuristics – just string membership.
+Because there are only ~200 genuine rows the prompt comfortably fits
+within GPT-4o’s 128 k context window.
 """
 
 from __future__ import annotations
@@ -30,17 +20,17 @@ import re
 from pathlib import Path
 from typing import Dict, List
 
-from ai_agents_framework import CentralaTask, FlagDetector, HttpClient
+from ai_agents_framework import CentralaTask, FlagDetector, LLMClient
 from task_utils import TaskRunner
 
 
-class ResearchTask(CentralaTask):
-    DATA_DIR = Path("data/lab_data")         # folder with the three .txt files
+class ResearchTaskLLM(CentralaTask):
+    DATA_DIR = Path("data/lab_data")        # folder with the three .txt files
 
-    # ---------------------------------------------------------------
+    # ------------------------------------------------------------------
     @staticmethod
-    def _slurp(fname: str) -> List[str]:
-        path = ResearchTask.DATA_DIR / fname
+    def _read(fname: str) -> List[str]:
+        path = ResearchTaskLLM.DATA_DIR / fname
         if not path.exists():
             raise FileNotFoundError(path.as_posix())
         return [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
@@ -48,37 +38,65 @@ class ResearchTask(CentralaTask):
     @staticmethod
     def _split_verify(line: str) -> tuple[str, str]:
         """
-        Expects "NN=word,word,word" and returns ("NN", "word,word,word")
+        Expect “NN=payload” → return ("NN", "payload")
         """
         m = re.match(r"\s*(\d{2})\s*=\s*(.*)", line)
         if not m:
-            raise ValueError(f"Malformed verify line: {line}")
+            raise ValueError(f"Bad verify line: {line}")
         return m.group(1), m.group(2).strip()
 
-    # ---------------------------------------------------------------
+    # ------------------------------------------------------------------
+    def _make_system_prompt(self, genuine: List[str]) -> str:
+        lines = "\n".join(genuine)
+        return (
+            "You are an expert validator of robot sensor readings.\n"
+            "Below is the exhaustive list of *genuine* readings—one per line.\n"
+            "Any other string MUST be considered forged.\n\n"
+            "GENUINE READINGS START\n"
+            f"{lines}\n"
+            "GENUINE READINGS END\n\n"
+            "When I send you a reading, respond with:\n"
+            "  1   … if it matches one of the genuine readings exactly\n"
+            "  0   … otherwise\n"
+            "Return a single character (1 or 0) with no explanation."
+        )
+
+    # ------------------------------------------------------------------
     def execute(self) -> Dict[str, object]:
-        correct_set = set(self._slurp("correct.txt"))
-        verify_rows = self._slurp("verify.txt")
+        correct = self._read("correct.txt")
+        verify  = self._read("verify.txt")
 
-        accepted: List[str] = []
-        for row in verify_rows:
+        system_prompt = self._make_system_prompt(correct)
+        accepted_ids: List[str] = []
+
+        for row in verify:
             uid, payload = self._split_verify(row)
-            if payload in correct_set:
-                accepted.append(uid)
+            resp = self.llm_client.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": payload},
+                ],
+                max_tokens=2,
+                temperature=0.0,
+            )
+            verdict = resp.choices[0].message.content.strip()
+            if verdict == "1":
+                accepted_ids.append(uid)
 
-        centrala_reply = self.submit_report("research", accepted)
+        centrala_reply = self.submit_report("research", accepted_ids)
         flag = FlagDetector.find_flag(json.dumps(centrala_reply))
 
         return {
             "status": "success",
-            "accepted": accepted,
+            "accepted": accepted_ids,
             "centrala_reply": centrala_reply,
             "flag": flag or "",
         }
 
 
-# -------------------------------------------------------------------
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
     runner = TaskRunner()
-    result = runner.run_task(ResearchTask)
-    runner.print_result(result, "research")
+    result = runner.run_task(ResearchTaskLLM)
+    runner.print_result(result, "research (LLM variant)")
