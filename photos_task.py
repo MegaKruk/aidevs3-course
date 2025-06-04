@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 S04E01 – photos + sekret 13 „Zapytaj gdy wykonasz robotę”
 
