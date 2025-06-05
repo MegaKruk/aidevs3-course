@@ -1,5 +1,3 @@
-# secret14.py  – v3: normalised prefix so we hit /portfolio_5_…
-#
 # Szuka brakujących numerów w sekwencjach   /prefix_N_<md5(N)>
 # i odwiedza wygenerowane strony, aby znaleźć {{FLG:…}}.
 
@@ -14,7 +12,7 @@ SESS   = requests.Session()
 SESS.headers["User-Agent"] = "secret14/3.0"
 FLAG_RE = re.compile(r"\{\{FLG:([^}]+)\}\}", re.I)
 
-#              /prefix_      N     _  32-hex
+#  /prefix_ N _ 32-hex
 PAT = re.compile(r"(?P<prefix>/.+?_)(?P<num>\d+)_(?P<hash>[0-9a-f]{32})", re.I)
 
 def md5(s: str) -> str:
