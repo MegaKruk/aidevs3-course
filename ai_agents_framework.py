@@ -28,6 +28,9 @@ from qdrant_client import QdrantClient, models as qm
 from qdrant_client.http.models import Batch, Filter, FieldCondition, MatchValue
 from neo4j import GraphDatabase, Driver
 import psycopg2, psycopg2.extras
+import fitz                        # PyMuPDF
+from pdf2image import convert_from_path
+import pytesseract, tempfile, subprocess, shutil
 
 # Disable SSL warnings for the course
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -288,7 +291,13 @@ class HttpClient:
             default_headers.update(headers)
 
         response = self.session.post(url, json=data, headers=default_headers)
-        print(f"response content: {response.content}")
+        print("response.content:")
+        try:
+            content_dict = response.json()
+            print(json.dumps(content_dict, indent=2, ensure_ascii=False))
+        except json.JSONDecodeError:
+            # fallback if response is not JSON
+            print(response.text)
         response.raise_for_status()
         return response.json()
 
@@ -1493,3 +1502,99 @@ class Neo4jGraph:
             if not rec:
                 raise RuntimeError("No path found")
             return rec["path"]
+
+
+class PDFProcessor:
+    def __init__(self, pdf_path: str):
+        self.path = pdf_path
+        self.doc = fitz.open(pdf_path)
+
+    def __del__(self):
+        """Clean up the PDF document when the object is destroyed."""
+        if hasattr(self, 'doc') and self.doc:
+            self.doc.close()
+
+    def extract_pages_text(self, first: int, last: int) -> list[str]:
+        """Return list of cleaned page texts (1-based inclusive)."""
+        out = []
+        for pg in range(first - 1, last):
+            if pg >= len(self.doc):
+                break
+            blocks = self.doc[pg].get_text("blocks")
+            # sort blocks top-left → bottom-right to keep column order
+            blocks.sort(key=lambda b: (round(b[1], 1), round(b[0], 1)))
+            txt = "\n".join(b[4].strip() for b in blocks if b[4].strip())
+            out.append(self._clean(txt))
+        return out
+
+    @staticmethod
+    def _clean(t: str) -> str:
+        t = re.sub(r"\s+\n", "\n", t)  # kill spaces before newline
+        t = re.sub(r"[\u00ad\u200b]", "", t)  # soft-hyphen, zwsp
+        return re.sub(r"[ ]{2,}", " ", t).strip()
+
+    def page_to_image(self, page_no: int, dpi: int = 300) -> str:
+        """Convert PDF page to image and return path to temporary PNG file."""
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                png_list = convert_from_path(
+                    self.path,
+                    dpi=dpi,
+                    first_page=page_no,
+                    last_page=page_no,
+                    output_folder=tmp,
+                    fmt="png"
+                )
+                if not png_list:
+                    raise ValueError(f"Failed to convert page {page_no} to image")
+
+                # Create a temporary file that won't be automatically deleted
+                out_path = tempfile.mktemp(suffix=".png")
+                png_list[0].save(out_path, "PNG")
+                return out_path
+        except Exception as e:
+            print(f"Error converting page {page_no} to image: {e}")
+            # Fallback: try using PyMuPDF directly
+            try:
+                page = self.doc[page_no - 1]
+                mat = fitz.Matrix(dpi / 72, dpi / 72)
+                pix = page.get_pixmap(matrix=mat)
+                out_path = tempfile.mktemp(suffix=".png")
+                pix.save(out_path)
+                return out_path
+            except Exception as e2:
+                print(f"Fallback method also failed: {e2}")
+                raise
+
+    def ocr_image(self, img_path: str) -> str:
+        """Extract text from image using vision model or OCR fallback."""
+        prompt = (
+            "Odczytaj z obrazka WSZYSTKIE słowa dokładnie tak jak widać, "
+            "zachowując kolejność i układ tekstu. Zwróć szczególną uwagę na "
+            "małe, szare teksty pod rysunkami i szkicami. Zwróć tylko czysty tekst."
+        )
+        try:
+            vision = VisionClient()
+            result = vision.ask_vision([img_path], prompt, model="gpt-4.1")
+            if result and result.strip():
+                print(f"ocr result: {result}")
+                return result.strip()
+            else:
+                raise ValueError("Empty result from vision model")
+        except Exception as e:
+            print(f"Vision OCR failed: {e}, falling back to Tesseract")
+            try:
+                # Enhanced Tesseract configuration for better OCR
+                custom_config = r'--oem 3 --psm 6 -l pol'
+                result = pytesseract.image_to_string(img_path, config=custom_config)
+                if not result.strip():
+                    # Try different PSM modes if first attempt fails
+                    for psm in [3, 11, 12, 13]:
+                        custom_config = f'--oem 3 --psm {psm} -l pol'
+                        result = pytesseract.image_to_string(img_path, config=custom_config)
+                        if result.strip():
+                            break
+                return result.strip()
+            except Exception as e2:
+                print(f"Tesseract OCR also failed: {e2}")
+                return ""

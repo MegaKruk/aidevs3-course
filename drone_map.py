@@ -4,8 +4,7 @@ from typing import List, Tuple
 
 from ai_agents_framework import LLMClient
 
-# 4×4 opis terenu – UZUPEŁNIJ ręcznie po obejrzeniu obrazka
-# Indeksy: GRID[row][col]  (row=0 góra, col=0 lewa)
+# 4x4 opis terenu  Indeksy: GRID[row][col]  (row=0 góra, col=0 lewa)
 GRID: list[list[str]] = [
     ["start",   "trawa",   "drzewo",   "dom"],
     ["trawa",   "wiatrak", "trawa",    "trawa"],
