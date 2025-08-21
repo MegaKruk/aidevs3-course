@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 # -----------------------------------------------------------------------------
 load_dotenv()
 ROOT       = Path("../data/pliki_z_fabryki/weapons_tests/do-not-share")
-JSONL_OUT  = Path("../_vector_cache.jsonl")
+JSONL_OUT  = Path("_vector_cache.jsonl")
 EMB_MODEL  = "text-embedding-3-large"
 EMB_DIM    = 3072
 QDRANT_URL = os.getenv("QDRANT_URL")
