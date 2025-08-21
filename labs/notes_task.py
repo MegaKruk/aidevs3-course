@@ -26,7 +26,7 @@ from task_utils import TaskRunner
 
 # ────────────────────────────────────────────────────────────────────────
 class NotesTask(CentralaTask):
-    PDF_PATH = "data/notatnik-rafala.pdf"
+    PDF_PATH = "../data/notatnik-rafala.pdf"
     QUESTIONS_URL = "https://c3ntrala.ag3nts.org/data/{apikey}/notes.json"
 
     DATE_RX = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
@@ -48,7 +48,7 @@ class NotesTask(CentralaTask):
             for i, t in enumerate(pdf.extract_pages_text(1, 18), 1)
         ]
 
-        ocr_dir = Path("data/ocr_results");  ocr_dir.mkdir(exist_ok=True, parents=True)
+        ocr_dir = Path("../data/ocr_results");  ocr_dir.mkdir(exist_ok=True, parents=True)
         ocr = []
         for i in range(1, 20):
             cache = ocr_dir / f"{i:02}.txt"

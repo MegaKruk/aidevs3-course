@@ -18,7 +18,7 @@ BASE_URL   = "https://c3ntrala.ag3nts.org"
 ART_URL    = f"{BASE_URL}/dane/arxiv-draft.html"
 QUEST_TPL  = f"{BASE_URL}/data/{{apikey}}/arxiv.txt"
 
-CACHE_DIR  = Path("_arxiv_cache");  CACHE_DIR.mkdir(exist_ok=True)
+CACHE_DIR  = Path("../_arxiv_cache");  CACHE_DIR.mkdir(exist_ok=True)
 IMG_DIR    = CACHE_DIR/"img";       IMG_DIR.mkdir(exist_ok=True)
 AUD_DIR    = CACHE_DIR/"audio";     AUD_DIR.mkdir(exist_ok=True)
 

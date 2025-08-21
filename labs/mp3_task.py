@@ -17,7 +17,7 @@ class MP3Task(CentralaTask):
         super().__init__(llm_client)
         self.audio_transcriber = AudioTranscription()
         self.transcriptions_file = "transcriptions.json"
-        self.transcriptions_dir = "./data/przesluchania"
+        self.transcriptions_dir = "../data/przesluchania"
 
     def extract_transcriptions(self) -> Dict[str, str]:
         """Extract transcriptions from audio files or load from cache"""

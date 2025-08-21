@@ -25,7 +25,7 @@ from task_utils import TaskRunner
 
 
 class ResearchTaskLLM(CentralaTask):
-    DATA_DIR = Path("data/lab_data")        # folder with the three .txt files
+    DATA_DIR = Path("../data/lab_data")        # folder with the three .txt files
 
     # ------------------------------------------------------------------
     @staticmethod

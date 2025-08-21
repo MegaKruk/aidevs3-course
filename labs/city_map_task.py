@@ -19,8 +19,8 @@ from PIL import Image
 from ai_agents_framework import CentralaTask, FlagDetector
 from task_utils import TaskRunner, verify_environment
 
-SRC_IMG = Path("data/mapa_with_borders.png")
-TMP_DIR = Path("_map_crops"); TMP_DIR.mkdir(exist_ok=True)
+SRC_IMG = Path("../data/mapa_with_borders.png")
+TMP_DIR = Path("../_map_crops"); TMP_DIR.mkdir(exist_ok=True)
 
 
 class CityMapTask(CentralaTask):

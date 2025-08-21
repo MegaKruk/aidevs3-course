@@ -6,10 +6,9 @@
 # • skrypt wysyła odpowiedź do Centrali
 
 from __future__ import annotations
-import unicodedata, json, textwrap
-from pathlib import Path
-from ai_agents_framework import CentralaTask, FlagDetector, LLMClient
-from task_utils import TaskRunner, verify_environment
+import unicodedata, json
+from labs.ai_agents_framework import CentralaTask, FlagDetector, LLMClient
+from labs.task_utils import TaskRunner, verify_environment
 
 # ---------------------------------------------------------------------------
 # RĘCZNIE ZDEKODOWANY „list od życia” (z wykorzystaniem par A#S#)

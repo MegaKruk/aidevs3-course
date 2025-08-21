@@ -14,7 +14,7 @@ import json
 import os
 import sys
 from dotenv import load_dotenv
-from ai_agents_framework import HttpClient
+from labs.ai_agents_framework import HttpClient
 
 
 class DatabaseAPI:

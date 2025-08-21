@@ -25,7 +25,7 @@ NOTE_URL    = f"{BASE_URL}/dane/barbara.txt"
 REPORT_URL  = f"{BASE_URL}/report"
 TASK_NAME   = "loop"
 
-RAW_DIR = Path("_secret_payloads")     # ensure visible also here
+RAW_DIR = Path("../_secret_payloads")     # ensure visible also here
 
 http  = HttpClient()
 llm   = LLMClient()

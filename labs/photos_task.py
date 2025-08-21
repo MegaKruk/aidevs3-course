@@ -20,8 +20,8 @@ load_dotenv()
 API_KEY   = os.getenv("CENTRALA_API_KEY")
 BOT_URL   = "https://c3ntrala.ag3nts.org/report"
 
-DL_DIR    = pathlib.Path("_photos");            DL_DIR.mkdir(exist_ok=True)
-SEC_DIR   = pathlib.Path("_secret_payloads");   SEC_DIR.mkdir(exist_ok=True)
+DL_DIR    = pathlib.Path("../_photos");            DL_DIR.mkdir(exist_ok=True)
+SEC_DIR   = pathlib.Path("../_secret_payloads");   SEC_DIR.mkdir(exist_ok=True)
 
 IMG_RE  = re.compile(r"https?://\S+\.(?:png|jpe?g)", re.I)
 NAME_RE = re.compile(r"[A-Za-z0-9_\-]+\.(?:png|jpe?g)", re.I)

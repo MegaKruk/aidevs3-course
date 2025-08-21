@@ -38,7 +38,7 @@ load_dotenv()
 
 Coordinate = Tuple[int, int]
 EMBED_MODEL = "text-embedding-3-large"
-RAW_DIR = pathlib.Path("_secret_payloads")
+RAW_DIR = pathlib.Path("../_secret_payloads")
 RAW_DIR.mkdir(exist_ok=True)
 
 

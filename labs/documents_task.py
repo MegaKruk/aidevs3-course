@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Set
 from ai_agents_framework import CentralaTask, LLMClient, FlagDetector
 from task_utils import TaskRunner, verify_environment, slurp, extract_persons
 
-DATA_DIR  = Path("./data/pliki_z_fabryki")
+DATA_DIR  = Path("../data/pliki_z_fabryki")
 FACTS_DIR = DATA_DIR / "facts"
 REPORT_RE = re.compile(r"\d{4}-\d{2}-\d{2}_report-\d+-sektor_[A-Z]\d\.txt$", re.I)
 

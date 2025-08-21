@@ -24,7 +24,7 @@ class CategoriesTask(CentralaTask):
         self.audio_client = AudioTranscription()
         self.file_analyzer = FileAnalyzer(llm_client, self.vision_client, self.audio_client)
         self.categorizer = ContentCategorizer(llm_client)
-        self.data_dir = "./data/pliki_z_fabryki"
+        self.data_dir = "../data/pliki_z_fabryki"
 
     def get_files_to_analyze(self) -> List[str]:
         """Get list of files to analyze, excluding facts folder and specific files"""
