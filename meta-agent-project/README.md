@@ -3,7 +3,6 @@
 ### OpenAI Models
 - **GPT-5**: Latest generation models (if available in your account)
   - `gpt-5`
-  - `gpt-5-turbo`
 - **GPT-4o**: Optimized GPT-4 variants
   - `gpt-4o`
   - `gpt-4o-mini`
@@ -22,9 +21,9 @@
   - `qwen2.5:14b-instruct` (decision-making)
   - `qwen2.5-coder:14b` (code generation)
 - **Llama 3**: Alternative option
-  - `llama3.2:latest`
-- **CodeLlama**: Specialized for coding
-  - `codellama:13b`
+  - `llama3.1:8b`
+- **DeepSeek Coder**: Alternative option for coding
+  - 'deepseek-coder-v2:16b'
 
 ## Cost Considerations
 
@@ -38,7 +37,7 @@
 
 ### Ollama
 - Free (runs locally)
-- Requires ~16GB RAM for 14B models# Meta Agent - Autonomous LLM-Powered Homework Solver
+- Requires at least ~16GB RAM for 14B models# Meta Agent - Autonomous LLM-Powered Homework Solver
 
 ## Overview
 
@@ -54,10 +53,10 @@ Meta Agent supports multiple LLM providers and uses a dual-model approach for op
 
 ### Dual-Model Architecture:
 - **Decision Model**: Used for analysis, summarization, strategy planning, and decision-making
-  - OpenAI: `gpt-4-turbo-preview` (default)
+  - OpenAI: `gpt-4o` (default)
   - Ollama: `qwen2.5:14b-instruct` (default)
 - **Coding Model**: Specialized model for generating Python code solutions
-  - OpenAI: `gpt-4-turbo-preview` (default)
+  - OpenAI: `gpt-4o` (default)
   - Ollama: `qwen2.5-coder:14b` (default)
 
 This separation ensures that each task is handled by the most appropriate model, improving both accuracy and efficiency.
@@ -84,8 +83,8 @@ pip install -r requirements.txt
 
 3. Set up environment variables:
 ```bash
-# Copy the example file
-cp .env.example .env
+# Create the .env file
+touch .env
 
 # Edit .env and add your OpenAI API key (optional)
 nano .env
