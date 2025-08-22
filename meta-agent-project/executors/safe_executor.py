@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import json
 import shlex
 
-from utils.logger import setup_logger
+from utils.logger import setup_logger, ExecutionLogger
 
 logger = setup_logger(__name__)
 
@@ -24,6 +24,7 @@ class ExecutionResult:
     error: Optional[str]
     return_code: int
     timeout: bool = False
+    execution_time: float = 0.0
 
 
 class SafeCodeExecutor:
@@ -32,10 +33,11 @@ class SafeCodeExecutor:
     """
 
     def __init__(
-            self,
-            timeout: int = 30,
-            memory_limit_mb: int = 256,
-            use_docker: bool = False
+        self,
+        timeout: int = 30,
+        memory_limit_mb: int = 256,
+        use_docker: bool = False,
+        log_executions: bool = True
     ):
         """
         Initialize safe executor
@@ -44,10 +46,15 @@ class SafeCodeExecutor:
             timeout: Maximum execution time in seconds
             memory_limit_mb: Memory limit in MB
             use_docker: Whether to use Docker for isolation
+            log_executions: Whether to log all executions
         """
         self.timeout = timeout
         self.memory_limit_mb = memory_limit_mb
         self.use_docker = use_docker and self._check_docker_available()
+        self.log_executions = log_executions
+
+        if self.log_executions:
+            self.execution_logger = ExecutionLogger()
 
         if self.use_docker:
             logger.info("Using Docker for code execution")
@@ -55,23 +62,62 @@ class SafeCodeExecutor:
         else:
             logger.info("Using subprocess isolation for code execution")
 
-    def execute(self, code: str, input_data: Optional[str] = None) -> ExecutionResult:
+    def execute(self, code: str, input_data: Optional[str] = None, attempt_number: int = 1) -> ExecutionResult:
         """
         Execute Python code safely
 
         Args:
             code: Python code to execute
             input_data: Optional input data for the program
+            attempt_number: Current attempt number for logging
 
         Returns:
             ExecutionResult object
         """
-        logger.info("Executing generated code safely")
+        logger.info(f"Executing generated code safely (attempt #{attempt_number})")
+
+        import time
+        start_time = time.time()
 
         if self.use_docker:
-            return self._execute_docker(code, input_data)
+            result = self._execute_docker(code, input_data)
         else:
-            return self._execute_subprocess(code, input_data)
+            result = self._execute_subprocess(code, input_data)
+
+        result.execution_time = time.time() - start_time
+
+        # Log the execution
+        if self.log_executions and self.execution_logger:
+            # Check for flag in output
+            flag = None
+            if result.output:
+                import re
+                flag_match = re.search(r'FLG:[A-Z0-9_]+', result.output)
+                if flag_match:
+                    flag = flag_match.group(0)
+
+            self.execution_logger.log_execution(
+                attempt_number=attempt_number,
+                code=code,
+                result={
+                    "return_code": result.return_code,
+                    "timeout": result.timeout,
+                    "execution_time": result.execution_time
+                },
+                success=result.success,
+                output=result.output,
+                error=result.error if result.error else "",
+                flag_found=flag
+            )
+
+        # Also log key info to standard logger
+        logger.info(f"Execution completed in {result.execution_time:.2f}s - Success: {result.success}")
+        if result.output:
+            logger.debug(f"Output preview: {result.output[:200]}...")
+        if result.error:
+            logger.warning(f"Execution error: {result.error[:200]}...")
+
+        return result
 
     def _execute_subprocess(self, code: str, input_data: Optional[str] = None) -> ExecutionResult:
         """
@@ -86,10 +132,10 @@ class SafeCodeExecutor:
         """
         # Create temporary file for code
         with tempfile.NamedTemporaryFile(
-                mode='w',
-                suffix='.py',
-                delete=False,
-                dir=tempfile.gettempdir()
+            mode='w',
+            suffix='.py',
+            delete=False,
+            dir=tempfile.gettempdir()
         ) as f:
             f.write(code)
             temp_file = f.name

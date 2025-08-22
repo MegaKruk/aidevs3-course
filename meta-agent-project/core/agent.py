@@ -16,7 +16,9 @@ from processors.homework_extractor import HomeworkExtractor
 from processors.code_generator import CodeGenerator
 from executors.safe_executor import SafeCodeExecutor
 from executors.result_analyzer import ResultAnalyzer
-from utils.logger import setup_logger
+from core.llm_client import LLMProvider
+from tools.web_fetcher import WebFetcher
+from utils.logger import setup_logger, ExecutionLogger, log_separator
 
 logger = setup_logger(__name__)
 
@@ -42,6 +44,9 @@ class MetaAgent:
         self,
         decision_model: str = "qwen2.5:14b-instruct",
         coding_model: str = "qwen2.5-coder:14b",
+        openai_decision_model: str = "gpt-4o",
+        openai_coding_model: str = "gpt-4o",
+        provider: str = "auto",
         max_attempts: int = 5,
         output_dir: Path = Path("./output"),
         verbose: bool = False
@@ -50,20 +55,47 @@ class MetaAgent:
         Initialize the Meta Agent
 
         Args:
-            decision_model: Model for analysis and decision-making
-            coding_model: Model for code generation
+            decision_model: Ollama model for analysis and decision-making
+            coding_model: Ollama model for code generation
+            openai_decision_model: OpenAI model for decision-making
+            openai_coding_model: OpenAI model for code generation
+            provider: LLM provider ("auto", "ollama", "openai")
             max_attempts: Maximum attempts to solve homework
             output_dir: Directory for output files
             verbose: Enable verbose logging
         """
         self.decision_model = decision_model
         self.coding_model = coding_model
+        self.openai_decision_model = openai_decision_model
+        self.openai_coding_model = openai_coding_model
+        self.provider = provider
         self.max_attempts = max_attempts
         self.output_dir = Path(output_dir)
         self.verbose = verbose
 
+        # Map provider string to enum
+        provider_map = {
+            "auto": None,
+            "ollama": LLMProvider.OLLAMA,
+            "openai": LLMProvider.OPENAI
+        }
+        provider_enum = provider_map.get(provider, None)
+
         # Initialize components with appropriate models
-        self.llm_client = LLMClient(decision_model, coding_model)
+        self.llm_client = LLMClient(
+            decision_model=decision_model,
+            coding_model=coding_model,
+            openai_decision_model=openai_decision_model,
+            openai_coding_model=openai_coding_model,
+            provider=provider_enum
+        )
+
+        # Log provider info
+        provider_info = self.llm_client.get_provider_info()
+        logger.info(f"Active provider: {provider_info['provider']}")
+        logger.info(f"Decision model: {provider_info['decision_model']}")
+        logger.info(f"Coding model: {provider_info['coding_model']}")
+
         self.context_manager = ContextManager()
         self.strategy_planner = StrategyPlanner(self.llm_client)
         self.lesson_processor = LessonProcessor(self.llm_client)
@@ -153,6 +185,11 @@ class MetaAgent:
         last_error = None
         generated_code = None
 
+        # Create execution logger for detailed tracking
+        exec_logger = ExecutionLogger()
+
+        log_separator(logger, f"STARTING HOMEWORK SOLUTION - MAX {self.max_attempts} ATTEMPTS")
+
         while attempts < self.max_attempts:
             attempts += 1
             logger.info(f"Attempt {attempts}/{self.max_attempts} to solve homework")
@@ -174,14 +211,30 @@ class MetaAgent:
                 code_path.write_text(generated_code)
                 self._record_step(f"Generated solution code (attempt {attempts})")
 
-                # Execute code safely
-                execution_result = self.safe_executor.execute(generated_code)
+                logger.info(f"Generated code saved to: {code_path}")
+                logger.debug(f"Code length: {len(generated_code)} characters")
+
+                # Execute code safely with attempt number
+                execution_result = self.safe_executor.execute(
+                    generated_code,
+                    attempt_number=attempts
+                )
 
                 if execution_result.success:
                     # Analyze output for flag
                     flag = self._extract_flag(execution_result.output)
                     if flag:
                         self._record_step(f"Successfully found flag: {flag}")
+                        logger.info(f"SUCCESS! Flag found: {flag}")
+
+                        # Log final success
+                        exec_logger.log_summary({
+                            "status": "SUCCESS",
+                            "flag": flag,
+                            "attempts": attempts,
+                            "total_attempts": self.max_attempts
+                        })
+
                         return self._create_result(
                             success=True,
                             flag=flag,
@@ -192,9 +245,11 @@ class MetaAgent:
                     else:
                         last_error = "Code executed but no flag found in output"
                         self._record_step(f"Attempt {attempts}: {last_error}")
+                        logger.warning(f"Attempt {attempts}: No flag found in output")
                 else:
                     last_error = execution_result.error
                     self._record_step(f"Attempt {attempts} failed: {last_error}")
+                    logger.error(f"Attempt {attempts} execution failed: {last_error}")
 
                 # Analyze failure and prepare for retry
                 if attempts < self.max_attempts:
@@ -204,6 +259,7 @@ class MetaAgent:
                         homework.task_description
                     )
                     self.context_manager.add_to_context(f"analysis_attempt_{attempts}", analysis)
+                    logger.info(f"Analysis complete, preparing for next attempt")
 
             except Exception as e:
                 last_error = str(e)
@@ -211,6 +267,17 @@ class MetaAgent:
                 self._record_step(f"Attempt {attempts} error: {e}")
 
         # Max attempts reached
+        log_separator(logger, "MAX ATTEMPTS REACHED - FAILED TO SOLVE")
+
+        # Log final failure
+        exec_logger.log_summary({
+            "status": "FAILED",
+            "flag": None,
+            "attempts": attempts,
+            "total_attempts": self.max_attempts,
+            "last_error": last_error
+        })
+
         return self._create_result(
             success=False,
             flag=None,
@@ -230,7 +297,6 @@ class MetaAgent:
 
     def _fetch_external_resources(self, urls: List[str]) -> Dict[str, str]:
         """Fetch content from external URLs"""
-        from tools.web_fetcher import WebFetcher
         fetcher = WebFetcher()
 
         resources = {}
@@ -289,12 +355,10 @@ class MetaAgent:
     def _save_homework(self, homework, lesson_name: str):
         """Save homework task to file"""
         homework_path = self.output_dir / f"homework_{lesson_name}.md"
-        content = f"# Homework Task\n\n{homework.task_description}\n\n"
-        if homework.urls:
-            content += f"## Referenced URLs\n\n"
-            for url in homework.urls:
-                content += f"- {url}\n"
+        content = f"# Homework Task\n\n{homework.task_description}\n"
+        # No need to add URLs separately since they're already in the full content
         homework_path.write_text(content)
+        logger.info(f"Saved complete homework ({len(homework.task_description)} chars) to: {homework_path}")
 
     def save_report(self, result: AgentResult, report_path: Path):
         """Save execution report to file"""

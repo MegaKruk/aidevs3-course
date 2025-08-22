@@ -1,4 +1,44 @@
-# Meta Agent - Autonomous LLM-Powered Homework Solver
+## Available Models
+
+### OpenAI Models
+- **GPT-5**: Latest generation models (if available in your account)
+  - `gpt-5`
+  - `gpt-5-turbo`
+- **GPT-4o**: Optimized GPT-4 variants
+  - `gpt-4o`
+  - `gpt-4o-mini`
+- **GPT-4 Turbo**: Best overall performance for both analysis and coding
+  - `gpt-4-turbo-preview`
+  - `gpt-4-1106-preview`
+- **GPT-4**: Excellent for complex reasoning
+  - `gpt-4`
+  - `gpt-4-32k`
+- **GPT-3.5 Turbo**: Faster and more cost-effective
+  - `gpt-3.5-turbo`
+  - `gpt-3.5-turbo-16k`
+
+### Ollama Models
+- **Qwen 2.5**: Recommended for local execution
+  - `qwen2.5:14b-instruct` (decision-making)
+  - `qwen2.5-coder:14b` (code generation)
+- **Llama 3**: Alternative option
+  - `llama3.2:latest`
+- **CodeLlama**: Specialized for coding
+  - `codellama:13b`
+
+## Cost Considerations
+
+### OpenAI
+- GPT-5: Pricing varies (check OpenAI platform)
+- GPT-4o: ~$0.005 per 1K input tokens, ~$0.015 per 1K output tokens
+- GPT-4o-mini: ~$0.002 per 1K input tokens, ~$0.008 per 1K output tokens
+- GPT-4 Turbo: ~$0.01 per 1K input tokens, ~$0.03 per 1K output tokens
+- GPT-3.5 Turbo: ~$0.0005 per 1K input tokens, ~$0.0015 per 1K output tokens
+- Typical homework solving: $0.10 - $0.50 per lesson
+
+### Ollama
+- Free (runs locally)
+- Requires ~16GB RAM for 14B models# Meta Agent - Autonomous LLM-Powered Homework Solver
 
 ## Overview
 
@@ -6,10 +46,19 @@ Meta Agent is an autonomous AI system that reads course lessons, extracts homewo
 
 ## Key Features
 
-Meta Agent uses a dual-model approach for optimal performance:
+Meta Agent supports multiple LLM providers and uses a dual-model approach for optimal performance:
 
-- **Decision Model** (`qwen2.5:14b-instruct`): Used for analysis, summarization, strategy planning, and decision-making
-- **Coding Model** (`qwen2.5-coder:14b`): Specialized model for generating Python code solutions
+### Supported Providers:
+- **OpenAI** (Recommended): GPT-4 models for superior accuracy
+- **Ollama**: Local models for privacy and cost-effectiveness
+
+### Dual-Model Architecture:
+- **Decision Model**: Used for analysis, summarization, strategy planning, and decision-making
+  - OpenAI: `gpt-4-turbo-preview` (default)
+  - Ollama: `qwen2.5:14b-instruct` (default)
+- **Coding Model**: Specialized model for generating Python code solutions
+  - OpenAI: `gpt-4-turbo-preview` (default)
+  - Ollama: `qwen2.5-coder:14b` (default)
 
 This separation ensures that each task is handled by the most appropriate model, improving both accuracy and efficiency.
 
@@ -33,18 +82,31 @@ cd /home/megakruk/workspace/python/aidevs3-course/meta-agent-project
 pip install -r requirements.txt
 ```
 
-3. Ensure Ollama is running:
+3. Set up environment variables:
 ```bash
-ollama serve
+# Copy the example file
+cp .env.example .env
+
+# Edit .env and add your OpenAI API key (optional)
+nano .env
 ```
 
-4. Pull the required models:
-```bash
-# For decision-making and analysis
-ollama pull qwen2.5:14b-instruct
+4. Set up your LLM provider:
 
-# For code generation
-ollama pull qwen2.5-coder:14b
+#### Option A: OpenAI (Recommended)
+```bash
+# Add your API key to .env file:
+OPENAI_API_KEY=sk-your-key-here
+```
+
+#### Option B: Ollama (Local)
+```bash
+# Start Ollama service
+ollama serve
+
+# Pull required models
+ollama pull qwen2.5:14b-instruct    # For decision-making
+ollama pull qwen2.5-coder:14b        # For code generation
 ```
 
 ## Project Structure
@@ -86,10 +148,50 @@ meta-agent-project/
 python meta_agent_main.py lessons/S01E02-custom-data-1730734993.md
 ```
 
+## Usage
+
+### Basic Usage
+
+```bash
+# Auto-detect provider (uses OpenAI if API key is set, otherwise Ollama)
+python meta_agent_main.py lessons/S01E02-custom-data-1730734993.md
+
+# Force OpenAI provider
+python meta_agent_main.py lessons/lesson.md --provider openai
+
+# Force Ollama provider
+python meta_agent_main.py lessons/lesson.md --provider ollama
+```
+
 ### With Options
 
 ```bash
+# Using OpenAI with custom models
 python meta_agent_main.py lessons/lesson.md \
+    --provider openai \
+    --openai-decision-model gpt-4o \
+    --openai-coding-model gpt-4o \
+    --max-attempts 5 \
+    --output-dir ./output \
+    --verbose
+
+# Using GPT-4o-mini for cost efficiency
+python meta_agent_main.py lessons/lesson.md \
+    --provider openai \
+    --openai-decision-model gpt-4o-mini \
+    --openai-coding-model gpt-4o-mini \
+    --max-attempts 5
+
+# Using GPT-5 (if available in your account)
+python meta_agent_main.py lessons/lesson.md \
+    --provider openai \
+    --openai-decision-model gpt-5-turbo \
+    --openai-coding-model gpt-5-turbo \
+    --max-attempts 3
+
+# Using Ollama with custom models
+python meta_agent_main.py lessons/lesson.md \
+    --provider ollama \
     --decision-model qwen2.5:14b-instruct \
     --coding-model qwen2.5-coder:14b \
     --max-attempts 5 \
@@ -100,8 +202,11 @@ python meta_agent_main.py lessons/lesson.md \
 ### Command Line Arguments
 
 - `lesson_file`: Path to the lesson file (required)
+- `--provider`: LLM provider to use: "auto", "ollama", "openai" (default: auto)
 - `--decision-model`: Ollama model for analysis and decisions (default: qwen2.5:14b-instruct)
 - `--coding-model`: Ollama model for code generation (default: qwen2.5-coder:14b)
+- `--openai-decision-model`: OpenAI model for decisions (default: gpt-4-turbo-preview)
+- `--openai-coding-model`: OpenAI model for coding (default: gpt-4-turbo-preview)
 - `--max-attempts`: Maximum solution attempts (default: 5)
 - `--output-dir`: Output directory (default: ./output)
 - `--verbose`: Enable verbose logging
@@ -120,12 +225,72 @@ python meta_agent_main.py lessons/lesson.md \
 
 ## Output Files
 
-The agent generates several output files in the specified output directory:
+The agent generates several output files:
 
+### In Output Directory (`./output/`)
 - `summary_[lesson_name].md`: Lesson summary and key takeaways
 - `homework_[lesson_name].md`: Extracted homework task
 - `solution_attempt_[n].py`: Generated Python code for each attempt
 - `report_[lesson_name].md`: Final execution report
+
+### In Logs Directory (`./logs/`)
+- `meta_agent_[timestamp].log`: Complete execution log with:
+  - All generated code for each attempt
+  - Full execution output and errors
+  - Detailed execution metadata
+  - Step-by-step progress tracking
+  - Success/failure status for each attempt
+  - Found flags (if any)
+
+## Logging Features
+
+The Meta Agent provides comprehensive logging:
+
+### Console Output
+- Real-time progress updates
+- Key milestones and results
+- Error summaries
+
+### File Logging
+- **Complete Execution Trace**: Every action is logged with timestamps
+- **Code Archive**: All generated code attempts are preserved
+- **Output Capture**: Full stdout/stderr from code execution
+- **Error Analysis**: Detailed error messages and stack traces
+- **Performance Metrics**: Execution times and attempt counts
+
+### Log Levels
+- **INFO**: General progress and milestones
+- **DEBUG**: Detailed execution information (in log file)
+- **WARNING**: Non-critical issues
+- **ERROR**: Execution failures and exceptions
+
+Example log entry:
+```
+================================================================================
+EXECUTION ATTEMPT #1 - 2024-11-04 10:30:45
+================================================================================
+
+STATUS: SUCCESS
+FLAG: FLG:EXAMPLE123
+
+--- GENERATED CODE (456 chars) ---
+[Full Python code here]
+
+--- EXECUTION OUTPUT ---
+[Program output here]
+
+--- ERRORS ---
+(No errors)
+
+--- EXECUTION METADATA ---
+{
+  "timestamp": "2024-11-04T10:30:45",
+  "attempt": 1,
+  "success": true,
+  "flag_found": "FLG:EXAMPLE123",
+  "execution_time": 1.23
+}
+```
 
 ## Success Criteria
 
@@ -143,6 +308,21 @@ The agent considers a task successfully solved when:
 
 ## Troubleshooting
 
+### OpenAI Issues
+
+#### API Key Not Working
+Ensure your API key is correctly set:
+```bash
+# Check if environment variable is set
+echo $OPENAI_API_KEY
+
+# Or verify in Python
+python -c "import os; print(os.getenv('OPENAI_API_KEY'))"
+```
+
+#### Rate Limits
+If you encounter rate limits, the agent will automatically retry with exponential backoff.
+
 ### Ollama Connection Issues
 
 Ensure Ollama is running:
@@ -152,17 +332,22 @@ ollama serve
 
 ### Model Not Found
 
-Pull the required model:
+For Ollama:
 ```bash
-ollama pull llama3.2:latest
+ollama pull qwen2.5:14b-instruct
+ollama pull qwen2.5-coder:14b
 ```
 
-### Permission Errors
+For OpenAI, ensure you have access to the specified models in your account.
 
-Ensure write permissions for output directory:
-```bash
-chmod 755 output/
-```
+### Provider Auto-Detection
+
+The agent automatically selects the best available provider:
+1. If `OPENAI_API_KEY` is set and valid → Uses OpenAI
+2. If Ollama is running and accessible → Uses Ollama
+3. Otherwise → Raises an error
+
+You can force a specific provider with the `--provider` flag.
 
 ## Example Lesson Format
 

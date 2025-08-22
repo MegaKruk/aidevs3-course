@@ -1,6 +1,5 @@
 from setuptools import setup, find_packages
 
-
 setup(
     name="meta-agent",
     version="1.0.0",

@@ -56,16 +56,22 @@ class CodeGenerator:
 
         system_prompt = """You are an expert Python programmer solving homework tasks.
 Generate clean, working Python 3.13 code that solves the given task.
-Important rules:
+
+CRITICAL RULES:
 1. Write ONLY Python code, no explanations or markdown
 2. Include all necessary imports
-3. Handle errors gracefully
-4. Print the final result in the required format
-5. If the task requires finding a flag, print it in format: FLG:XXXXX
-6. Use requests library for HTTP calls
-7. Include proper error handling
-8. Write self-contained code that can run independently
-9. Write code to a single .py file"""
+3. Read and follow ALL instructions in the homework task
+4. Implement EXACTLY what is asked - don't skip steps
+5. If the task mentions specific endpoints, APIs, or procedures - USE THEM
+6. Handle errors gracefully
+7. Print the final result in the required format
+8. If the task requires finding a flag, it will be returned by the API/service
+9. DO NOT fake or hallucinate flags - they must come from the actual service
+10. Use requests library for HTTP calls
+11. Follow any specific protocols mentioned (e.g., POST requests, headers, etc.)
+12. Write self-contained code that can run independently
+
+Remember: The flag (FLG:XXXXX) must be obtained from the actual service, not invented!"""
 
         # Generate code using the coding model
         code = self.llm_client.generate(
@@ -95,7 +101,7 @@ Important rules:
         Build comprehensive prompt for code generation
 
         Args:
-            task_description: Task to solve
+            task_description: Task to solve (complete homework section)
             context: Additional context
             previous_attempt: Previous code if fixing
             error_message: Previous error if fixing
@@ -105,46 +111,55 @@ Important rules:
         """
         prompt_parts = []
 
-        # Add task description
-        prompt_parts.append(f"Task to solve:\n{task_description}\n")
+        # Add COMPLETE task description (which is now the full homework section)
+        prompt_parts.append("="*80)
+        prompt_parts.append("COMPLETE HOMEWORK TASK:")
+        prompt_parts.append("="*80)
+        prompt_parts.append(task_description)
+        prompt_parts.append("="*80)
+        prompt_parts.append("")
 
-        # Add URLs if present
-        if "homework_urls" in context and context["homework_urls"]:
-            prompt_parts.append("Referenced URLs:")
-            for url in context["homework_urls"]:
-                prompt_parts.append(f"- {url}")
-            prompt_parts.append("")
-
-        # Add external data if present
+        # Add external data if present and not too large
         if "external_data" in context and context["external_data"]:
-            prompt_parts.append("External data available:")
+            prompt_parts.append("FETCHED EXTERNAL DATA:")
+            prompt_parts.append("-"*40)
             for url, content in context["external_data"].items():
-                # Limit content preview
-                preview = content[:500] if len(content) > 500 else content
-                prompt_parts.append(f"\nFrom {url}:")
-                prompt_parts.append(f"{preview}...")
+                # Include more of the external data for context
+                preview = content[:2000] if len(content) > 2000 else content
+                prompt_parts.append(f"\nContent from {url}:")
+                prompt_parts.append(f"{preview}")
+                if len(content) > 2000:
+                    prompt_parts.append(f"... (truncated, total length: {len(content)} chars)")
+            prompt_parts.append("-"*40)
             prompt_parts.append("")
 
         # Add previous attempt context if fixing
         if previous_attempt and error_message:
-            prompt_parts.append("Previous attempt failed with error:")
-            prompt_parts.append(f"{error_message}\n")
-            prompt_parts.append("Previous code:")
+            prompt_parts.append("PREVIOUS ATTEMPT FAILED:")
+            prompt_parts.append("-"*40)
+            prompt_parts.append(f"Error: {error_message}\n")
+            prompt_parts.append("Previous code that failed:")
             prompt_parts.append(f"```python\n{previous_attempt}\n```\n")
-            prompt_parts.append("Fix the issue and generate working code.")
+            prompt_parts.append("Please fix the issue and generate working code.")
+            prompt_parts.append("-"*40)
+            prompt_parts.append("")
 
         # Add analysis from previous attempts if available
         for i in range(1, 6):
             analysis_key = f"analysis_attempt_{i}"
             if analysis_key in context:
                 analysis = context[analysis_key]
-                prompt_parts.append(f"\nAnalysis from attempt {i}:")
+                prompt_parts.append(f"Analysis from attempt {i}:")
                 if isinstance(analysis, dict):
                     prompt_parts.append(json.dumps(analysis, indent=2))
                 else:
                     prompt_parts.append(str(analysis))
+                prompt_parts.append("")
 
-        prompt_parts.append("\nGenerate Python code that solves this task:")
+        prompt_parts.append("="*80)
+        prompt_parts.append("Generate Python code that solves this homework task.")
+        prompt_parts.append("Follow ALL the instructions and requirements mentioned above.")
+        prompt_parts.append("="*80)
 
         return "\n".join(prompt_parts)
 
