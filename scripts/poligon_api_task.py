@@ -2,7 +2,7 @@ import requests
 import urllib3
 
 TASK_NAME = "POLIGON"
-API_KEY = "282681d1-0759-4803-adaf-719eaf031904"
+API_KEY = "123"
 DATA_URL = "https://poligon.aidevs.pl/dane.txt"
 VERIFY_URL = "https://poligon.aidevs.pl/verify"
 
@@ -21,3 +21,4 @@ payload = {
 verify_response = requests.post(VERIFY_URL, json=payload, verify=False)
 verify_response.raise_for_status()
 print(verify_response.json())
+
