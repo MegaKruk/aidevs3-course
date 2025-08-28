@@ -72,9 +72,6 @@ This separation ensures that each task is handled by the most appropriate model,
 ### Setup
 
 1. Clone the repository:
-```bash
-cd /home/megakruk/workspace/python/aidevs3-course/meta-agent-project
-```
 
 2. Install dependencies:
 ```bash
