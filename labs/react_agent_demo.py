@@ -1,53 +1,80 @@
+"""
+ReAct Agent Showcase - Python AI Engineer Interview Demo
+=========================================================
+Demonstrates: LangChain, LangGraph, ReAct pattern, state management,
+loop prevention, multi-agent design, versioning, compliance, FastAPI deployment,
+and LightRAG graph-enhanced retrieval.
+
+Author: MegaKruk
+Python: 3.12
+
+Setup:
+    1. Create .env file with: OPENAI_API_KEY=your-key-here
+    2. pip install python-dotenv langchain langchain-openai langgraph pydantic fastapi uvicorn lightrag-hku pypdf
+    3. Place documents in ./documents/ folder for indexing
+    4. python react_agent_demo.py
+"""
+
 import asyncio
+import json
 import logging
 import operator
 import os
+import re
+import shutil
 from datetime import datetime
 from enum import Enum
-from typing import Annotated, Any, Literal
-from dotenv import load_dotenv
+from pathlib import Path
+from typing import Annotated, Any, Literal, TypedDict
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
-from langgraph.prebuilt import ToolNode
+from lightrag import LightRAG, QueryParam
+from lightrag.llm.openai import openai_complete_if_cache, openai_embed
+from lightrag.utils import EmbeddingFunc
 from pydantic import BaseModel, Field
+from pypdf import PdfReader
 
 # Load environment variables from .env file
 load_dotenv()
 
 
-# SECTION 1: CONFIGURATION & VERSIONING
-# Key point: Version EVERYTHING - prompts, models, tools, configs
+# CONFIGURATION AND VERSIONING
 class Environment(str, Enum):
-    """Deployment environments with different configurations."""
     DEVELOPMENT = "development"
     STAGING = "staging"
     PRODUCTION = "production"
 
 
 class AgentConfig(BaseModel):
-    """
-    Versioned configuration for the agent.
-    In production: pin exact model versions, not just 'gpt-4'.
-    """
-    version: str = "1.0.0"
-    model_name: str = "gpt-4o"# Pin exact version in prod: "gpt-4-0613"
-    temperature: float = 0.0  # 0 for deterministic production behavior
-    max_iterations: int = 10  # Prevent infinite loops
-    recursion_limit: int = 25  # LangGraph hard stop
-    timeout_seconds: int = 60  # Global timeout
+    """Versioned configuration for the agent."""
+    version: str = "2.0.0"  # Updated for LightRAG integration
+    model_name: str = "gpt-4o"
+    indexing_model_name: str = "gpt-4o-mini"
+    temperature: float = 0.0
+    max_iterations: int = 10
+    recursion_limit: int = 25
+    timeout_seconds: int = 120  # Increased for LightRAG operations
     environment: Environment = Environment.DEVELOPMENT
-    prompt_version: str = "v1.0.0"
+    prompt_version: str = "v2.0.0"
 
-    # Feature flags for gradual rollout / instant rollback
+    # Feature flags
+    enable_lightrag: bool = True  # Toggle LightRAG features
     verbose_logging: bool = True
 
+    # LightRAG settings
+    lightrag_working_dir: str = "./lightrag_data"
+    documents_dir: str = "./documents"
+    chunk_token_size: int = 500
+    chunk_overlap_token_size: int = 100
 
-# Load config based on environment
+
 def load_config(env: Environment = Environment.DEVELOPMENT) -> AgentConfig:
-    """Load environment-specific configuration."""
     configs = {
         Environment.DEVELOPMENT: AgentConfig(
             temperature=0.7,
@@ -61,7 +88,7 @@ def load_config(env: Environment = Environment.DEVELOPMENT) -> AgentConfig:
         ),
         Environment.PRODUCTION: AgentConfig(
             temperature=0.0,
-            verbose_logging=False,  # Structured logging only
+            verbose_logging=False,
             environment=Environment.PRODUCTION,
         ),
     }
@@ -70,8 +97,8 @@ def load_config(env: Environment = Environment.DEVELOPMENT) -> AgentConfig:
 
 CONFIG = load_config()
 
-# SECTION 2: LOGGING & OBSERVABILITY
-# Key point: Log EVERYTHING - thoughts, actions, observations for debugging
+
+# LOGGING AND OBSERVABILITY
 logging.basicConfig(
     level=logging.DEBUG if CONFIG.verbose_logging else logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -81,7 +108,7 @@ logger = logging.getLogger(__name__)
 
 
 class AgentTrace:
-    """Simple tracing for observability - in prod use LangSmith or similar."""
+    """Simple tracing for observability."""
 
     def __init__(self):
         self.steps: list[dict[str, Any]] = []
@@ -93,7 +120,7 @@ class AgentTrace:
             "timestamp": datetime.now().isoformat(),
             "step_number": len(self.steps) + 1,
             "type": step_type,
-            "content": content[:500],  # Truncate for logging
+            "content": content[:500],
             "metadata": metadata or {},
         }
         self.steps.append(step)
@@ -107,45 +134,227 @@ class AgentTrace:
         }
 
 
-# SECTION 3: STATE MANAGEMENT WITH PYDANTIC
-# Key point: State flows between nodes, use Annotated for accumulation
-from typing import TypedDict
+# LIGHTRAG INTEGRATION
+def extract_text_from_pdf(file_path: Path) -> str:
+    """Extract text content from a PDF file."""
+    reader = PdfReader(file_path)
+    text_parts = []
+    for page in reader.pages:
+        text = page.extract_text()
+        if text:
+            text_parts.append(text)
+    return "\n".join(text_parts)
 
 
+class LightRAGManager:
+    """
+    Manager for LightRAG knowledge base operations.
+
+    LightRAG provides graph-enhanced RAG with:
+    - Knowledge graph extraction from documents
+    - Dual-level retrieval (local entities + global relationships)
+    - Incremental document updates
+    """
+
+    def __init__(self, config: AgentConfig):
+        self.config = config
+        self.rag: LightRAG | None = None
+        self._initialized = False
+
+    async def initialize(self) -> bool:
+        """Initialize LightRAG instance."""
+        if self._initialized:
+            return True
+
+        try:
+            # Create working directory
+            Path(self.config.lightrag_working_dir).mkdir(parents=True, exist_ok=True)
+
+            # Initialize LightRAG with OpenAI
+            self.rag = LightRAG(
+                working_dir=self.config.lightrag_working_dir,
+                llm_model_func=lambda prompt, system_prompt=None, history_messages=[], **kwargs:
+                openai_complete_if_cache(
+                    # Use gpt-4o-mini for indexing tasks to save tokens/limit
+                    self.config.indexing_model_name if "keyword" in str(prompt).lower() or "entities" in str(
+                        prompt).lower() else self.config.model_name,
+                    prompt,
+                    system_prompt=system_prompt,
+                    history_messages=history_messages,
+                    api_key=os.getenv("OPENAI_API_KEY"),
+                    **kwargs
+                ),
+                embedding_func=EmbeddingFunc(
+                    embedding_dim=1536,
+                    func=lambda texts: openai_embed(
+                        texts,
+                        model="text-embedding-3-small",
+                        api_key=os.getenv("OPENAI_API_KEY"),
+                    )
+                ),
+                chunk_token_size=self.config.chunk_token_size,
+                chunk_overlap_token_size=self.config.chunk_overlap_token_size,
+                llm_model_max_async=1,  # Process only 1 chunk at a time
+                embedding_func_max_async=1,  # Process only 1 embedding batch at a time
+            )
+
+            # Critical: Initialize storage backends
+            await self.rag.initialize_storages()
+
+            self._initialized = True
+            logger.info("LightRAG initialized successfully")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to initialize LightRAG: {e}")
+            return False
+
+    async def index_document(self, content: str, doc_id: str | None = None) -> dict:
+        """Index a document into the knowledge graph."""
+        if not self._initialized:
+            await self.initialize()
+
+        try:
+            if doc_id:
+                await self.rag.ainsert(content, ids=[doc_id])
+            else:
+                await self.rag.ainsert(content)
+
+            return {"success": True, "message": "Document indexed successfully"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def index_documents_from_folder(self, folder_path: str | None = None) -> dict:
+        """Index all supported files from a folder."""
+        folder = Path(folder_path or self.config.documents_dir)
+
+        if not folder.exists():
+            folder.mkdir(parents=True, exist_ok=True)
+            return {"success": False, "message": f"Created empty folder: {folder}. Add documents and retry."}
+
+        results = {"indexed": [], "failed": [], "skipped": []}
+
+        # Support multiple file types including PDF
+        patterns = ["*.txt", "*.md", "*.json", "*.pdf"]
+        files = []
+        for pattern in patterns:
+            files.extend(folder.glob(pattern))
+
+        if not files:
+            return {"success": False, "message": f"No documents found in {folder}"}
+
+        for file_path in files:
+            try:
+                # Handle PDF files separately
+                if file_path.suffix.lower() == ".pdf":
+                    content = extract_text_from_pdf(file_path)
+                else:
+                    content = file_path.read_text(encoding="utf-8")
+
+                if len(content.strip()) < 100:
+                    results["skipped"].append(str(file_path))
+                    continue
+
+                result = await self.index_document(content, doc_id=file_path.stem)
+                if result["success"]:
+                    results["indexed"].append(str(file_path))
+                else:
+                    results["failed"].append({"file": str(file_path), "error": result.get("error")})
+            except Exception as e:
+                results["failed"].append({"file": str(file_path), "error": str(e)})
+
+        return {
+            "success": len(results["indexed"]) > 0,
+            "total_files": len(files),
+            "indexed": len(results["indexed"]),
+            "failed": len(results["failed"]),
+            "skipped": len(results["skipped"]),
+            "details": results
+        }
+
+    async def query(
+            self,
+            question: str,
+            mode: Literal["naive", "local", "global", "hybrid", "mix"] = "hybrid"
+    ) -> dict:
+        """Query the knowledge base using different retrieval modes."""
+        if not self._initialized:
+            await self.initialize()
+
+        try:
+            param = QueryParam(
+                mode=mode,
+                top_k=60,
+                max_total_tokens=30000,
+            )
+
+            result = await self.rag.aquery(question, param=param)
+
+            return {
+                "success": True,
+                "answer": result,
+                "mode": mode,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e), "mode": mode}
+
+    async def get_context_only(self, question: str, mode: str = "hybrid") -> dict:
+        """Get only the retrieved context without generating an answer."""
+        if not self._initialized:
+            await self.initialize()
+
+        try:
+            param = QueryParam(
+                mode=mode,
+                only_need_context=True,
+            )
+
+            context = await self.rag.aquery(question, param=param)
+            return {"success": True, "context": context, "mode": mode}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def cleanup(self):
+        """Cleanup LightRAG resources."""
+        if self.rag and self._initialized:
+            try:
+                await self.rag.finalize_storages()
+                logger.info("LightRAG resources cleaned up")
+            except Exception as e:
+                logger.error(f"Error during LightRAG cleanup: {e}")
+
+
+# Global LightRAG manager instance
+lightrag_manager: LightRAGManager | None = None
+
+
+async def get_lightrag_manager() -> LightRAGManager:
+    """Get or create LightRAG manager instance."""
+    global lightrag_manager
+    if lightrag_manager is None:
+        lightrag_manager = LightRAGManager(CONFIG)
+        await lightrag_manager.initialize()
+    return lightrag_manager
+
+
+# STATE MANAGEMENT WITH PYDANTIC
 class AgentState(TypedDict):
-    """
-    State schema for LangGraph.
-
-    Key patterns:
-    - Annotated[list, operator.add]: Messages ACCUMULATE across nodes
-    - Regular fields: Get REPLACED each time
-    """
-    # Messages accumulate - crucial for conversation history
+    """State schema for LangGraph."""
     messages: Annotated[list[BaseMessage], operator.add]
-
-    # Tracking fields - replaced each update
     current_step: str
     iteration_count: int
-
-    # Loop detection
-    last_actions: list[str]  # Track recent actions to detect loops
-
-    # Results
+    last_actions: list[str]
     final_answer: str | None
-
-    # Observability
     trace: dict | None
 
 
-# SECTION 4: TOOL DEFINITIONS
-# Key point: Tools are functions the agent can call. Use @tool decorator.
+# TOOL DEFINITIONS (sync tools only - async tools handled separately)
 @tool
 def search_database(query: str) -> str:
     """
     Search the company database for information.
     Use this when you need to find data about products, customers, or sales.
     """
-    # Simulated database search
     logger.debug(f"Searching database for: {query}")
 
     mock_data = {
@@ -172,11 +381,11 @@ def calculate(expression: str) -> str:
     """
     logger.debug(f"Calculating: {expression}")
     try:
-        # Safe eval - only allow math operations
         allowed_chars = set("0123456789+-*/().% ")
         if not all(c in allowed_chars for c in expression):
             return "Error: Invalid characters in expression"
         result = eval(expression)
+        result = round(result, 10)
         return f"Result: {result}"
     except Exception as e:
         return f"Calculation error: {str(e)}"
@@ -191,24 +400,55 @@ def get_current_date() -> str:
     return f"Current date and time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
 
-@tool
-def send_notification(recipient: str, message: str) -> str:
-    """
-    Send a notification to a user.
-    Use this when you need to alert or notify someone.
-    """
-    # In production: integrate with email/Slack/Teams
-    logger.info(f"Notification to {recipient}: {message}")
+# Tool metadata for LLM (descriptions for tool binding)
+TOOL_DESCRIPTIONS = {
+    "search_knowledge_base": {
+        "name": "search_knowledge_base",
+        "description": "Search the knowledge base using graph-enhanced retrieval (LightRAG).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query"},
+                "mode": {
+                    "type": "string",
+                    "default": "hybrid",
+                    "enum": ["naive", "local", "global", "hybrid", "mix"],
+                    "description": "Search mode: naive (basic), local (entity-focused), global (relationship-focused), hybrid (balanced), mix (KG+vector)"
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    "index_document": {
+        "name": "index_document",
+        "description": "Index a new document into the knowledge base.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The document content to index"},
+                "doc_id": {"type": "string", "default": "", "description": "Optional document identifier"}
+            },
+            "required": ["content"]
+        }
+    },
+    "index_folder": {
+        "name": "index_folder",
+        "description": "Index all documents within a specific folder.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "folder_path": {"type": "string", "default": "", "description": "Path to the folder containing documents"}
+            },
+            "required": []
+        }
+    }
+}
 
-    return f"Notification sent to {recipient}: '{message[:50]}...'"
+# Sync tools list
+SYNC_TOOLS = [search_database, calculate, get_current_date]
 
 
-# All available tools
-TOOLS = [search_database, calculate, get_current_date, send_notification]
-
-
-# SECTION 5: LANGGRAPH NODES
-# Key point: Nodes are functions that receive state and return partial updates
+# LANGGRAPH NODES
 def create_llm() -> ChatOpenAI:
     """Create LLM with tool binding."""
     llm = ChatOpenAI(
@@ -216,10 +456,27 @@ def create_llm() -> ChatOpenAI:
         temperature=CONFIG.temperature,
         api_key=os.getenv("OPENAI_API_KEY", "demo-key"),
     )
-    return llm.bind_tools(TOOLS)
+
+    # Bind sync tools normally
+    tools_for_binding = SYNC_TOOLS.copy()
+
+    # Add async tool definitions manually as function schemas
+    async_tool_schemas = [
+        {"type": "function", "function": TOOL_DESCRIPTIONS["search_knowledge_base"]},
+        {"type": "function", "function": TOOL_DESCRIPTIONS["index_document"]},
+        {"type": "function", "function": TOOL_DESCRIPTIONS["index_folder"]},
+    ]
+
+    # Bind sync tools first, then add async schemas
+    llm_with_tools = llm.bind_tools(tools_for_binding)
+
+    # Override with all tools including async ones
+    return llm.bind(tools=[
+        *[{"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.args_schema.schema() if hasattr(t, 'args_schema') and t.args_schema else {"type": "object", "properties": {}}}} for t in SYNC_TOOLS],
+        *async_tool_schemas
+    ])
 
 
-# System prompt - versioned!
 SYSTEM_PROMPT = """You are a helpful AI assistant with access to tools.
 
 Your approach (ReAct pattern):
@@ -232,36 +489,35 @@ Available tools:
 - search_database: Find company data (revenue, products, customers)
 - calculate: Perform mathematical calculations
 - get_current_date: Get current date/time
-- send_notification: Send alerts to users
+- search_knowledge_base: Search indexed documents using graph-enhanced RAG (LightRAG)
+  * Use mode='local' for specific entity queries ("Who is X?", "What is Y?")
+  * Use mode='global' for relationship queries ("How does X relate to Y?")
+  * Use mode='hybrid' for general queries (default, balanced approach)
+  * Use mode='mix' for complex multi-hop queries
+- index_document: Add new documents to the knowledge base
 
 Guidelines:
 - Be concise and direct
-- Use tools when you need real data, don't make up numbers
-- If you have enough information, provide the final answer
+- Use tools when you need real data
+- For document/knowledge queries, prefer search_knowledge_base over search_database
 - Always explain your reasoning briefly
 
 Prompt version: {prompt_version}
 """
 
 
-def agent_node(state: AgentState) -> dict:
-    """
-    Agent reasoning node - the 'brain' of the ReAct loop.
-    Receives state, calls LLM, returns message update.
-    """
+async def agent_node(state: AgentState) -> dict:
+    """Agent reasoning node."""
     logger.info(f"Agent node - iteration {state.get('iteration_count', 0) + 1}")
 
-    # Prepare messages with system prompt
     system_msg = SystemMessage(content=SYSTEM_PROMPT.format(prompt_version=CONFIG.prompt_version))
     messages = [system_msg] + state["messages"]
 
-    # Call LLM
     llm = create_llm()
-    response = llm.invoke(messages)
+    response = await llm.ainvoke(messages)
 
     logger.debug(f"Agent response: {response.content[:100] if response.content else 'Tool call'}...")
 
-    # Return partial state update - messages will be APPENDED due to operator.add
     return {
         "messages": [response],
         "current_step": "reasoning",
@@ -269,46 +525,95 @@ def agent_node(state: AgentState) -> dict:
     }
 
 
-def tool_node(state: AgentState) -> dict:
+async def tool_node(state: AgentState) -> dict:
     """
-    Tool execution node.
-    Uses LangGraph's ToolNode for automatic tool invocation.
+    Tool execution node - handles both sync and async tools.
+
+    This is the key fix: we execute tools directly in the async context
+    instead of using ToolNode which runs sync tools in a thread pool.
     """
     logger.info("Executing tools...")
 
-    # Get last message (should have tool calls)
     last_message = state["messages"][-1]
-
-    # Track actions for loop detection
     action_names = []
+    tool_messages = []
+
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        action_names = [tc["name"] for tc in last_message.tool_calls]
+        for tool_call in last_message.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+            tool_id = tool_call["id"]
+            action_names.append(tool_name)
 
-    # Execute tools using LangGraph's ToolNode
-    tool_executor = ToolNode(TOOLS)
-    result = tool_executor.invoke(state)
+            logger.debug(f"Executing tool: {tool_name} with args: {tool_args}")
 
-    # Update last_actions for loop detection
-    current_actions = state.get("last_actions", [])[-5:]  # Keep last 5
+            try:
+                # Handle async LightRAG tools
+                if tool_name == "search_knowledge_base":
+                    query = tool_args.get("query", "")
+                    mode = tool_args.get("mode", "hybrid")
+                    logger.debug(f"LightRAG search: {query} (mode={mode})")
+                    manager = await get_lightrag_manager()
+                    result = await manager.query(query, mode=mode)
+                    if result["success"]:
+                        output = f"[Knowledge Base - {mode} mode]\n{result['answer']}"
+                    else:
+                        output = f"Search failed: {result.get('error', 'Unknown error')}"
+
+                elif tool_name == "index_document":
+                    content = tool_args.get("content", "")
+                    doc_id = tool_args.get("doc_id", "")
+                    manager = await get_lightrag_manager()
+                    result = await manager.index_document(content, doc_id or None)
+                    if result["success"]:
+                        output = f"Document '{doc_id or 'unnamed'}' indexed successfully."
+                    else:
+                        output = f"Indexing failed: {result.get('error', 'Unknown error')}"
+
+                elif tool_name == "index_folder":
+                    folder_path = tool_args.get("folder_path", "")
+                    manager = await get_lightrag_manager()
+                    result = await manager.index_documents_from_folder(folder_path or None)
+                    if result["success"]:
+                        output = f"Success! Indexed: {result['indexed']}, Failed: {result['failed']}"
+                    else:
+                        output = f"Failed: {result.get('message')}"
+
+                # Handle sync tools
+                elif tool_name == "search_database":
+                    output = search_database.invoke(tool_args)
+
+                elif tool_name == "calculate":
+                    output = calculate.invoke(tool_args)
+
+                elif tool_name == "get_current_date":
+                    output = get_current_date.invoke({})
+
+                else:
+                    output = f"Unknown tool: {tool_name}"
+
+            except Exception as e:
+                logger.error(f"Tool execution error: {e}")
+                output = f"Error executing {tool_name}: {str(e)}"
+
+            # Create tool message with result
+            tool_messages.append(ToolMessage(content=output, tool_call_id=tool_id))
+
+    current_actions = state.get("last_actions", [])[-5:]
     current_actions.extend(action_names)
 
     return {
-        "messages": result["messages"],
+        "messages": tool_messages,
         "current_step": "tool_execution",
-        "last_actions": current_actions[-6:],  # Keep last 6 for comparison
+        "last_actions": current_actions[-6:],
     }
 
 
-# SECTION 6: LOOP PREVENTION
-# Key point: Multiple strategies - max iterations, recursion limit, detection
+# LOOP PREVENTION
 def detect_loop(state: AgentState) -> bool:
-    """
-    Detect if agent is stuck in a loop.
-    Strategy: Check if same action repeated 3+ times consecutively.
-    """
+    """Detect if agent is stuck in a loop."""
     actions = state.get("last_actions", [])
     if len(actions) >= 3:
-        # Check last 3 actions
         last_three = actions[-3:]
         if len(set(last_three)) == 1:
             logger.warning(f"Loop detected! Action '{last_three[0]}' repeated 3 times")
@@ -317,95 +622,58 @@ def detect_loop(state: AgentState) -> bool:
 
 
 def should_continue(state: AgentState) -> Literal["tools", "end"]:
-    """
-    Routing function - decides next step.
-    This is where we implement loop prevention!
-    """
-    # Strategy 1: Max iterations check
+    """Routing function with loop prevention."""
     if state.get("iteration_count", 0) >= CONFIG.max_iterations:
-        logger.warning(f"Max iterations ({CONFIG.max_iterations}) reached - forcing end")
+        logger.warning(f"Max iterations ({CONFIG.max_iterations}) reached")
         return "end"
 
-    # Strategy 2: Loop detection
     if detect_loop(state):
-        logger.warning("Loop detected - forcing end")
         return "end"
 
-    # Check if last message has tool calls
     last_message = state["messages"][-1]
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        logger.debug("Has tool calls - routing to tools")
         return "tools"
 
-    # No tool calls = agent is done
-    logger.debug("No tool calls - ending")
     return "end"
 
 
-# SECTION 7: BUILD THE GRAPH
-# Key point: StateGraph with nodes, edges, and conditional routing
+# BUILD THE GRAPH
 def build_agent_graph() -> StateGraph:
-    """
-    Build the LangGraph agent.
-
-    Graph structure:
-    [START] -> [agent] -> {tools} -> {END or REPEAT}
-    """
-    # 1. Create graph with state schema
+    """Build the LangGraph agent."""
     workflow = StateGraph(AgentState)
 
-    # 2. Add nodes
     workflow.add_node("agent", agent_node)
     workflow.add_node("tools", tool_node)
 
-    # 3. Set entry point
     workflow.set_entry_point("agent")
 
-    # 4. Add conditional edges (the ReAct loop!)
     workflow.add_conditional_edges(
         "agent",
         should_continue,
-        {
-            "tools": "tools",
-            "end": END,
-        }
+        {"tools": "tools", "end": END}
     )
 
-    # 5. After tools, always go back to agent (the loop)
     workflow.add_edge("tools", "agent")
 
     return workflow
 
 
-# Compile the graph
 agent_graph = build_agent_graph()
 agent_app = agent_graph.compile()
 
 
-# SECTION 8: RUNTIME WITH TIMEOUT & ERROR HANDLING
-# Key point: Wrap execution with timeout, handle errors gracefully
+# RUNTIME
 async def run_agent_async(
         query: str,
         timeout: int | None = None,
         session_id: str | None = None,
 ) -> dict[str, Any]:
-    """
-    Run the agent with timeout protection.
-
-    Args:
-        query: User's question
-        timeout: Max execution time in seconds
-        session_id: For conversation tracking (checkpointing)
-
-    Returns:
-        Agent response with metadata
-    """
+    """Run the agent with timeout protection."""
     timeout = timeout or CONFIG.timeout_seconds
     trace = AgentTrace()
 
     trace.log_step("input", query)
 
-    # Prepare initial state
     initial_state: AgentState = {
         "messages": [HumanMessage(content=query)],
         "current_step": "start",
@@ -416,16 +684,14 @@ async def run_agent_async(
     }
 
     try:
-        # Run with timeout (Strategy 4 for loop prevention)
         result = await asyncio.wait_for(
             agent_app.ainvoke(
                 initial_state,
-                {"recursion_limit": CONFIG.recursion_limit}  # Strategy 2
+                {"recursion_limit": CONFIG.recursion_limit}
             ),
             timeout=timeout
         )
 
-        # Extract final answer
         final_message = result["messages"][-1]
         answer = final_message.content if hasattr(final_message, "content") else str(final_message)
 
@@ -440,65 +706,37 @@ async def run_agent_async(
         }
 
     except asyncio.TimeoutError:
-        logger.error(f"Agent timed out after {timeout}s")
-        trace.log_step("error", f"Timeout after {timeout}s")
-        return {
-            "success": False,
-            "error": f"Agent timed out after {timeout} seconds",
-            "answer": None,
-            "trace": trace.get_summary(),
-        }
+        return {"success": False, "error": f"Timeout after {timeout}s", "answer": None}
     except Exception as e:
         logger.exception("Agent execution failed")
-        trace.log_step("error", str(e))
-        return {
-            "success": False,
-            "error": str(e),
-            "answer": None,
-            "trace": trace.get_summary(),
-        }
+        return {"success": False, "error": str(e), "answer": None}
 
 
 def run_agent(query: str) -> dict[str, Any]:
-    """Synchronous wrapper for the async agent."""
+    """Synchronous wrapper."""
     return asyncio.run(run_agent_async(query))
 
 
-# SECTION 9: FASTAPI DEPLOYMENT
-# Key point: Production-ready API with proper request/response models
-try:
-    from fastapi import FastAPI, HTTPException
-    from fastapi.middleware.cors import CORSMiddleware
-
-    FASTAPI_AVAILABLE = True
-except ImportError:
-    FASTAPI_AVAILABLE = False
-
-
-def create_api() -> "FastAPI":
-    """Create FastAPI application for agent deployment."""
-    if not FASTAPI_AVAILABLE:
-        raise ImportError("FastAPI not installed. Run: pip install fastapi uvicorn")
-
+# FASTAPI DEPLOYMENT
+def create_api() -> FastAPI:
+    """Create FastAPI application."""
     app = FastAPI(
-        title="ReAct Agent API",
-        description="LangGraph-based ReAct agent with compliance features",
+        title="ReAct Agent API with LightRAG",
+        description="LangGraph-based ReAct agent with graph-enhanced RAG",
         version=CONFIG.version,
     )
 
-    # CORS for web clients
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Restrict in production!
+        allow_origins=["*"],
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # Request/Response models
     class AgentRequest(BaseModel):
         query: str = Field(..., description="User's question or task")
-        session_id: str | None = Field(None, description="Session ID for conversation tracking")
-        timeout: int | None = Field(None, description="Custom timeout in seconds")
+        session_id: str | None = Field(None, description="Session ID")
+        timeout: int | None = Field(None, description="Timeout in seconds")
 
     class AgentResponse(BaseModel):
         success: bool
@@ -507,213 +745,184 @@ def create_api() -> "FastAPI":
         iterations: int | None = None
         config_version: str
 
+    class IndexRequest(BaseModel):
+        content: str = Field(..., description="Document content to index")
+        doc_id: str | None = Field(None, description="Document identifier")
+
+    class IndexFolderRequest(BaseModel):
+        folder_path: str | None = Field(None, description="Folder path to index")
+
+    class KnowledgeQueryRequest(BaseModel):
+        query: str = Field(..., description="Search query")
+        mode: str = Field("hybrid", description="Search mode: naive, local, global, hybrid, mix")
+
     @app.post("/agent/invoke", response_model=AgentResponse)
     async def invoke_agent(request: AgentRequest):
-        """Invoke the ReAct agent with a query."""
-        try:
-            result = await run_agent_async(
-                query=request.query,
-                timeout=request.timeout,
-                session_id=request.session_id,
-            )
-            return AgentResponse(
-                success=result["success"],
-                answer=result.get("answer"),
-                error=result.get("error"),
-                iterations=result.get("iterations"),
-                config_version=CONFIG.version,
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        """Invoke the ReAct agent."""
+        result = await run_agent_async(
+            query=request.query,
+            timeout=request.timeout,
+            session_id=request.session_id,
+        )
+        return AgentResponse(
+            success=result["success"],
+            answer=result.get("answer"),
+            error=result.get("error"),
+            iterations=result.get("iterations"),
+            config_version=CONFIG.version,
+        )
+
+    @app.post("/knowledge/index")
+    async def index_document_api(request: IndexRequest):
+        """Index a document into the knowledge base."""
+        manager = await get_lightrag_manager()
+        result = await manager.index_document(request.content, request.doc_id)
+        return result
+
+    @app.post("/knowledge/index-folder")
+    async def index_folder_api(request: IndexFolderRequest):
+        """Index all documents from a folder."""
+        manager = await get_lightrag_manager()
+        result = await manager.index_documents_from_folder(request.folder_path)
+        return result
+
+    @app.post("/knowledge/query")
+    async def query_knowledge_api(request: KnowledgeQueryRequest):
+        """Query the knowledge base directly."""
+        manager = await get_lightrag_manager()
+        result = await manager.query(request.query, mode=request.mode)
+        return result
 
     @app.get("/health")
     def health_check():
-        """Health check endpoint for load balancers."""
         return {
             "status": "healthy",
             "version": CONFIG.version,
-            "environment": CONFIG.environment.value,
+            "lightrag_enabled": CONFIG.enable_lightrag,
         }
 
     @app.get("/config")
     def get_config():
-        """Get current configuration (non-sensitive fields)."""
         return {
             "version": CONFIG.version,
             "environment": CONFIG.environment.value,
-            "prompt_version": CONFIG.prompt_version,
-            "max_iterations": CONFIG.max_iterations,
+            "lightrag_enabled": CONFIG.enable_lightrag,
             "model": CONFIG.model_name,
         }
 
     return app
 
 
-# SECTION 10: MULTI-AGENT EXAMPLE (Supervisor Pattern)
-# Key point: Supervisor routes tasks to specialized workers
-class MultiAgentState(TypedDict):
-    """State for multi-agent system."""
-    messages: Annotated[list[BaseMessage], operator.add]
-    next_agent: str
-    task_type: str
-    results: dict
-
-
-def supervisor_node(state: MultiAgentState) -> dict:
-    """
-    Supervisor agent - routes to specialists.
-    In production: Use LLM to make routing decisions.
-    """
-    last_msg = state["messages"][-1].content.lower()
-
-    # Simple keyword-based routing (use LLM in production)
-    if any(word in last_msg for word in ["calculate", "math", "number"]):
-        return {"next_agent": "calculator", "task_type": "calculation"}
-    elif any(word in last_msg for word in ["search", "find", "data", "revenue"]):
-        return {"next_agent": "researcher", "task_type": "research"}
-    else:
-        return {"next_agent": "generalist", "task_type": "general"}
-
-
-def build_multi_agent_graph() -> StateGraph:
-    """
-    Build multi-agent supervisor graph.
-
-    Structure:
-    [supervisor] -> {calculator | researcher | generalist} -> [END]
-    """
-    workflow = StateGraph(MultiAgentState)
-
-    # Add supervisor
-    workflow.add_node("supervisor", supervisor_node)
-
-    # Add worker nodes (simplified - use full agents in production)
-    workflow.add_node("calculator", lambda s: {"results": {"calc": "done"}})
-    workflow.add_node("researcher", lambda s: {"results": {"research": "done"}})
-    workflow.add_node("generalist", lambda s: {"results": {"general": "done"}})
-
-    workflow.set_entry_point("supervisor")
-
-    # Route based on supervisor decision
-    workflow.add_conditional_edges(
-        "supervisor",
-        lambda s: s["next_agent"],
-        {
-            "calculator": "calculator",
-            "researcher": "researcher",
-            "generalist": "generalist",
-        }
-    )
-
-    # All workers end
-    workflow.add_edge("calculator", END)
-    workflow.add_edge("researcher", END)
-    workflow.add_edge("generalist", END)
-
-    return workflow
-
-
 # MAIN
 def print_section(title: str):
-    """Print a section header."""
     print(f"\n{'=' * 60}")
     print(f"{title}")
     print(f"{'=' * 60}\n")
 
 
-def demo():
-    """Run demonstration of all features."""
-    print_section("ReAct Agent Demo")
+async def demo_async():
+    """Run demonstration of all features including LightRAG."""
+    print_section("ReAct Agent + LightRAG Showcase Demo")
 
     # Check for API key
-    if not os.getenv("OPENAI_API_KEY"):
-        print("NOTE: OPENAI_API_KEY not set. Using mock responses.\n")
-        print("Set the key to see real agent behavior:")
-        print("export OPENAI_API_KEY='your-key-here'\n")
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("NOTE: OPENAI_API_KEY not set.")
+        print("Set the key in .env file to see real behavior.\n")
+        return
 
     # Show configuration
-    print_section("1. Configuration & Versioning")
+    print_section("1. Configuration")
     print(f"Agent Version: {CONFIG.version}")
-    print(f"Prompt Version: {CONFIG.prompt_version}")
     print(f"Model: {CONFIG.model_name}")
-    print(f"Environment: {CONFIG.environment.value}")
-    print(f"Max Iterations: {CONFIG.max_iterations}")
-    print(f"Temperature: {CONFIG.temperature}")
-
-    # Show graph structure
-    print_section("2. LangGraph Structure")
-    print("Nodes: agent, tools")
-    print("Entry: agent")
-    print("Flow: agent -> (tools -> agent)* -> END")
-    print("Loop prevention: max_iterations, recursion_limit, detection, timeout")
-
-    # Show state schema
-    print_section("3. State Management")
-    print("AgentState fields:")
-    print("- messages: Annotated[list, operator.add]  # Accumulates!")
-    print("- iteration_count: int  # Replaced each update")
-    print("- last_actions: list[str]  # For loop detection")
-    print("- final_answer: str | None")
+    print(f"LightRAG Enabled: {CONFIG.enable_lightrag}")
 
     # Show tools
-    print_section("4. Available Tools")
-    for tool in TOOLS:
-        print(f"- {tool.name}: {tool.description[:60]}...")
+    print_section("2. Available Tools")
+    for t in SYNC_TOOLS:
+        print(f"- {t.name}: {t.description}...")
+    for name in TOOL_DESCRIPTIONS:
+        print(f"- {name}: {TOOL_DESCRIPTIONS[name]['description']}...")
 
-    # Run agent if API key is available
-    if os.getenv("OPENAI_API_KEY"):
-        print_section("6. Running Agent")
+    # LightRAG demo
+    if CONFIG.enable_lightrag:
+        print_section("3. LightRAG Knowledge Base")
 
-        queries = [
-            "What was the Q3 revenue and calculate 15% growth on it?",
-            "What is today's date?",
-            "Search for customer count and calculate average revenue per customer if revenue is 4.2M",
+        manager = await get_lightrag_manager()
+
+        # Check for documents to index
+        docs_dir = Path(CONFIG.documents_dir)
+        if docs_dir.exists() and list(docs_dir.glob("*")):
+            print(f"Found documents in {docs_dir}, indexing...")
+            result = await manager.index_documents_from_folder()
+            print(f"Indexing result: {result['indexed']} documents indexed")
+        else:
+            print(f"No documents in {docs_dir}")
+
+        # Demo queries
+        print_section("4. LightRAG Query Demos")
+
+        demo_queries = [
+            ("What are Filip's technical skills?", "local"),
+            ("How does Filip's experience relate to AI projects?", "global"),
+            ("Tell me about Filip's favorite dish", "hybrid"),
         ]
 
-        for query in queries:
+        for query, mode in demo_queries:
             print(f"\nQuery: {query}")
+            print(f"Mode: {mode}")
             print("-" * 40)
-            result = run_agent(query)
+            result = await manager.query(query, mode=mode)
             if result["success"]:
-                print(f"Answer: {result['answer']}")
-                print(f"Iterations: {result['iterations']}")
+                # Truncate long answers for demo
+                answer = result["answer"]
+                if len(answer) > 300:
+                    answer = answer[:300] + "..."
+                print(f"Answer: {answer}")
             else:
-                print(f"Error: {result['error']}")
-    else:
-        print_section("5. Example Queries (requires API key)")
-        print("Example queries the agent can handle:")
-        print("- 'What was the Q3 revenue and calculate 15% growth?'")
-        print("- 'What is today's date?'")
-        print("- 'Search for customer count and calculate average revenue'")
+                print(f"Error: {result.get('error')}")
 
-    # FastAPI info
-    print_section("6. FastAPI Deployment")
-    if FASTAPI_AVAILABLE:
-        print("FastAPI is available!")
-        print("To run the API server:")
-        print("uvicorn react_agent_demo:api --reload")
-        print("\nEndpoints:")
-        print("POST /agent/invoke - Run the agent")
-        print("GET /health - Health check")
-        print("GET /config - Current configuration")
-    else:
-        print("Install FastAPI: pip install fastapi uvicorn")
+    # Run agent demo
+    print_section("5. Agent Demo")
+
+    queries = [
+        "What skills does Filip have related to AI?",
+        "Calculate 4.2 million times 1.15 for revenue growth",
+    ]
+
+    for query in queries:
+        print(f"\nQuery: {query}")
+        print("-" * 40)
+        result = await run_agent_async(query)
+        if result["success"]:
+            answer = result["answer"]
+            if len(answer) > 300:
+                answer = answer[:300] + "..."
+            print(f"Answer: {answer}")
+            print(f"Iterations: {result['iterations']}")
+        else:
+            print(f"Error: {result['error']}")
+
+    # Cleanup
+    if lightrag_manager:
+        await lightrag_manager.cleanup()
 
     print_section("Demo Complete!")
-    print("This demo demonstrates:")
-    print("- ReAct pattern (Thought -> Action -> Observation)")
-    print("- LangChain tools with @tool decorator")
-    print("- LangGraph state machines with TypedDict")
-    print("- State passing with Annotated[list, operator.add]")
-    print("- Loop prevention (4 strategies)")
-    print("- Multi-agent supervisor pattern")
-    print("- Configuration versioning")
-    print("- FastAPI deployment ready")
+    print("Features demonstrated:")
+    print("- LightRAG graph-enhanced retrieval")
+    print("- Dual-level search (local/global/hybrid)")
+    print("- Document indexing with entity extraction")
+    print("- ReAct agent with knowledge base tool")
+    print("- FastAPI endpoints for all operations")
 
 
-# Create API instance for uvicorn
-if FASTAPI_AVAILABLE:
-    api = create_api()
+def demo():
+    """Sync wrapper for demo."""
+    asyncio.run(demo_async())
+
+
+# Create API instance
+api = create_api()
 
 if __name__ == "__main__":
     demo()
